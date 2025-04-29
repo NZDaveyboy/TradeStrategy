@@ -1,4 +1,4 @@
-	import streamlit as st
+import streamlit as st
 import pandas as pd
 import os
 
@@ -40,6 +40,9 @@ try:
     if os.path.exists(csv_path):
         df = pd.read_csv(csv_path)
 
+        # Debug output to check available columns
+        st.write("🧠 Columns Available:", df.columns.tolist())
+
         if os.path.exists(tickers_file):
             with open(tickers_file, "r") as file:
                 selected_tickers = [line.strip() for line in file]
@@ -49,20 +52,24 @@ try:
         # Apply basic filters
         filtered_df = df[(df["Change%"] >= min_change) & (df["RVOL"] >= min_rvol)]
 
-        st.subheader("🔎 Screener Results")
+        st.subheader("🔎 Screener Results (Basic View)")
         if not filtered_df.empty:
-            st.dataframe(filtered_df, use_container_width=True)
+            st.dataframe(filtered_df[["Ticker", "Change%", "RVOL"]], use_container_width=True)
+
             st.subheader("🚀 Top Movers")
             st.bar_chart(filtered_df.set_index("Ticker")["Change%"])
 
-            # Optionally Show Enrichment Fields
-            st.subheader("📈 Key Indicators")
-            st.dataframe(filtered_df[["Ticker", "Last_Close", "EMA_9", "EMA_20", "EMA_200", "VWAP", "MACD", "MACD_Signal", "Volume_Trend_Up"]], use_container_width=True)
+            st.subheader("📈 Key Indicators (Technical View)")
+            st.dataframe(filtered_df[[
+                "Ticker", "Last_Close", "EMA_9", "EMA_20", "EMA_200", 
+                "VWAP", "MACD", "MACD_Signal", "Volume_Trend_Up"
+            ]], use_container_width=True)
 
         else:
             st.warning("⚠️ No stocks match current filter settings.")
+
     else:
         st.error(f"❌ Enriched data file not found: {csv_path}")
 
 except Exception as e:
-    st.error(f"Unexpected error: {e}")
+    st.error(f"❌ Unexpected error: {e}")
