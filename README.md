@@ -1,36 +1,38 @@
-# Stock Screener - Intraday and Weekly Movers
+# Trade Strategy Screener (Intraday Headless Mode)
 
-This Python script screens for high-probability stock trading setups based on:
-- Relative Volume (RVOL)
-- Price Change (Intraday or Weekly)
-- EMA Alignment (9 > 20 > 200)
-- RSI < 70 (not overbought)
-- ATR-based dynamic stop-loss suggestion
-- VWAP awareness
-- Catalyst consideration (manual)
+[![Python](https://img.shields.io/badge/Python-3.10-blue)](https://www.python.org/)
+[![License](https://img.shields.io/badge/License-MIT-green)](LICENSE)
+[![Status](https://img.shields.io/badge/Status-Active-brightgreen)]()
+
+This Python script automatically screens for intraday high-probability stock trading setups.
 
 ## Features
-- Choose Intraday or Weekly Scan
-- Load tickers automatically from a text file
-- Export results to CSV
-- Optional email alerts for setups found
+- Intraday Mode (default)
+- RVOL > 3
+- Price Change > +10% (Today)
+- EMA Alignment (9 > 20 > 200)
+- RSI < 70
+- ATR-based dynamic stop-loss suggestion
+- Exports results to /outputs folder as CSV
+- GitHub Actions ready for automatic daily run
 
-## How to Use
+## Usage
 1. Install dependencies:
    ```bash
    pip install -r requirements.txt
    ```
-2. Prepare your `tickers.txt` with one ticker per line.
-3. Run the script:
-   ```bash
-   python stock_screener.py
-   ```
-4. Follow prompts for scan type and optional email alerts.
 
-## Files
-- `stock_screener.py`: Main script.
-- `tickers.txt`: List of tickers to scan.
-- `requirements.txt`: Python dependencies.
+2. Prepare `tickers.txt` with one ticker per line.
+
+3. Run locally:
+   ```bash
+   python stock_screener_auto.py
+   ```
+
+4. Or automate with GitHub Actions!
+
+## Automation
+The `.github/workflows/run_screener.yml` file runs this screener automatically every weekday at 9AM NZT.
 
 ---
-Created with ❤️ by YourName
+Created with ❤️ by NZDaveyboy
