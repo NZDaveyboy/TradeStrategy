@@ -37,8 +37,13 @@ st.caption("Auto-updated daily • Built by NZDaveyboy 🚀")
 # Load stock screener output
 csv_path = "outputs/screened_stocks_intraday.csv"
 
+csv_path = "outputs/screened_stocks_intraday.csv"
+
 if os.path.exists(csv_path):
     df = pd.read_csv(csv_path)
+    ...
+else:
+    st.warning("⚠️ No results file found yet. Please check after the next automation run.")
 
     # Filter by selected tickers
     if os.path.exists(tickers_file):
