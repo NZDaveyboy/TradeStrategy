@@ -1,1 +1,33 @@
-Add GitHub Action for screener enrichment
+name: Enrich Screener
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: 3.10
+
+    - name: Install dependencies
+      run: |
+        pip install yfinance pandas numpy
+
+    - name: Run enrichment script
+      run: |
+        python enrich_screener.py
+
+    - name: Commit and push results
+      run: |
+        git config user.name "github-actions"
+        git config user.email "github-actions@github.com"
+        git add screened_stocks_enriched.csv
+        git commit -m "Auto-enrich screener results"
+        git push
+
