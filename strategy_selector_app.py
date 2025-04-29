@@ -11,7 +11,7 @@ st.set_page_config(
 )
 
 # --- SIDEBAR ---
-st.sidebar.title("🎛 Select Your Strategy")
+st.sidebar.title("🎛 Strategy Selector")
 
 strategy = st.sidebar.selectbox(
     "Choose Strategy:",
@@ -21,52 +21,58 @@ strategy = st.sidebar.selectbox(
 ticker_files = {
     "General Screener": "tickers.txt",
     "AI Supply Chain": "tickers_ai.txt",
-    "Top 10 Tech": "tickers_tech.txt"  # You can add this file
+    "Top 10 Tech": "tickers_tech.txt"
 }
 
 tickers_file = ticker_files.get(strategy, "tickers.txt")
 
-st.sidebar.header("🔍 Filters")
+st.sidebar.header("🔍 Filter Settings")
 min_change = st.sidebar.slider("Minimum % Change", 0, 100, 10, 1)
 min_rvol = st.sidebar.slider("Minimum RVOL", 0.0, 20.0, 3.0, 0.1)
 
-# --- MAIN ---
-st.title(f"📈 {strategy} Dashboard")
-st.caption("Auto-updated daily • Built by NZDaveyboy 🚀")
-
-# Load stock screener output
-csv_path = "outputs/screened_stocks_intraday.csv"
+# --- MAIN AREA ---
+st.title(f"📈 {strategy}")
+st.caption("Auto-updated daily • Powered by NZDaveyboy 🚀")
 
 csv_path = "outputs/screened_stocks_intraday.csv"
 
+# --- Load data
 if os.path.exists(csv_path):
-    df = pd.read_csv(csv_path)
-    ...
+    st.success(f"✅ Found {csv_path}")
+
+    try:
+        df = pd.read_csv(csv_path)
+
+        # Validate if essential columns exist
+        if all(col in df.columns for col in ["Ticker", "Change%", "RVOL"]):
+
+            if os.path.exists(tickers_file):
+                with open(tickers_file, "r") as file:
+                    selected_tickers = [line.strip() for line in file]
+
+                df = df[df["Ticker"].isin(selected_tickers)]
+
+            # Apply user filters
+            filtered_df = df[(df["Change%"] >= min_change) & (df["RVOL"] >= min_rvol)]
+
+            st.subheader("🔎 Screener Results")
+            st.dataframe(filtered_df, use_container_width=True)
+
+            if not filtered_df.empty:
+                st.subheader("🚀 Top Movers")
+                st.bar_chart(filtered_df.set_index("Ticker")["Change%"])
+            else:
+                st.warning("⚠️ No stocks meet the current filters today.")
+
+        else:
+            st.error("❌ CSV is missing required columns: Ticker, Change%, RVOL")
+    
+    except Exception as e:
+        st.error(f"❌ Error loading CSV: {e}")
+
 else:
-    st.warning("⚠️ No results file found yet. Please check after the next automation run.")
+    st.warning("⚠️ No screener results found yet. Please check after the next automation run.")
 
-    # Filter by selected tickers
-    if os.path.exists(tickers_file):
-        with open(tickers_file, "r") as file:
-            selected_tickers = [line.strip() for line in file]
-        df = df[df["Ticker"].isin(selected_tickers)]
-
-    # Apply user filters
-    filtered_df = df[(df["Change%"] >= min_change) & (df["RVOL"] >= min_rvol)]
-
-    st.success(f"✅ {len(filtered_df)} stocks match your filters.")
-
-    st.subheader("🔎 Screener Results")
-    st.dataframe(filtered_df, use_container_width=True)
-
-    if not filtered_df.empty:
-        st.subheader("🚀 Top Movers")
-        st.bar_chart(filtered_df.set_index("Ticker")["Change%"])
-    else:
-        st.warning("⚠️ No matching stocks for your strategy and filters today.")
-else:
-    st.warning("⚠️ No results file found yet. Please check again after the next automation run.")
-
-# Footer
+# --- Footer
 st.sidebar.markdown("---")
-st.sidebar.caption("Created with ❤️ by NZDaveyboy • Live from GitHub")
+st.sidebar.caption("Built with ❤️ by NZDaveyboy")
