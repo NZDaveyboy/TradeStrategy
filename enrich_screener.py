@@ -1,61 +1,74 @@
 import yfinance as yf
 import pandas as pd
 import numpy as np
-import os
 
+# Load the original screener CSV
 input_file = "screened_stocks_intraday.csv"
 output_file = "screened_stocks_enriched.csv"
 
-if not os.path.exists(input_file):
-    raise Exception(f"Input file {input_file} not found!")
+df_input = pd.read_csv(input_file)
 
-df = pd.read_csv(input_file)
+# Combine all tickers from strategy files
+ticker_files = ["tickers.txt", "tickers_ai.txt", "tickers_tech.txt"]
+all_tickers = set()
 
+for file in ticker_files:
+    try:
+        with open(file, "r") as f:
+            tickers = [line.strip() for line in f.readlines() if line.strip()]
+            all_tickers.update(tickers)
+    except FileNotFoundError:
+        print(f"⚠️ File not found: {file} — skipping.")
+
+print(f"🧠 Unique tickers to enrich: {sorted(all_tickers)}")
+
+# Enrich each ticker
 enriched_rows = []
 
-for ticker in df["Ticker"]:
+for ticker in all_tickers:
     try:
-        stock_data = yf.download(ticker, period="5d", interval="5m", progress=False)
+        data = yf.download(ticker, period="15d", interval="1d", progress=False)
 
-        if stock_data.empty:
+        if data.empty or len(data) < 15:
+            print(f"⚠️ Not enough data for {ticker} — skipping.")
             continue
 
-        stock_data["EMA_9"] = stock_data["Close"].ewm(span=9, adjust=False).mean()
-        stock_data["EMA_20"] = stock_data["Close"].ewm(span=20, adjust=False).mean()
-        stock_data["EMA_200"] = stock_data["Close"].ewm(span=200, adjust=False).mean()
-        stock_data["VWAP"] = (stock_data["Volume"] * (stock_data["High"] + stock_data["Low"]) / 2).cumsum() / stock_data["Volume"].cumsum()
-        stock_data["MACD"] = stock_data["Close"].ewm(span=12, adjust=False).mean() - stock_data["Close"].ewm(span=26, adjust=False).mean()
-        stock_data["MACD_Signal"] = stock_data["MACD"].ewm(span=9, adjust=False).mean()
+        close = data["Close"]
+        volume = data["Volume"]
 
-        last_volume = stock_data["Volume"].iloc[-1]
-        avg_volume = stock_data["Volume"].tail(15).mean()
-        volume_trend_up = int(last_volume > avg_volume)
+        ema_9 = close.ewm(span=9).mean().iloc[-1]
+        ema_20 = close.ewm(span=20).mean().iloc[-1]
+        ema_200 = close.ewm(span=200).mean().iloc[-1] if len(close) >= 200 else np.nan
 
-        last_close = stock_data["Close"].iloc[-1]
-        last_vwap = stock_data["VWAP"].iloc[-1]
-        ema_9 = stock_data["EMA_9"].iloc[-1]
-        ema_20 = stock_data["EMA_20"].iloc[-1]
-        ema_200 = stock_data["EMA_200"].iloc[-1]
-        macd = stock_data["MACD"].iloc[-1]
-        macd_signal = stock_data["MACD_Signal"].iloc[-1]
+        vwap = (data["Close"] * data["Volume"]).sum() / data["Volume"].sum()
+
+        exp1 = close.ewm(span=12, adjust=False).mean()
+        exp2 = close.ewm(span=26, adjust=False).mean()
+        macd = exp1 - exp2
+        signal = macd.ewm(span=9, adjust=False).mean()
+
+        vol_trend = 1 if volume[-1] > volume[-15:].mean() else 0
 
         enriched_rows.append({
             "Ticker": ticker,
-            "Last_Close": last_close,
+            "Last_Close": close.iloc[-1],
             "EMA_9": ema_9,
             "EMA_20": ema_20,
             "EMA_200": ema_200,
-            "VWAP": last_vwap,
-            "MACD": macd,
-            "MACD_Signal": macd_signal,
-            "Volume_Trend_Up": volume_trend_up,
+            "VWAP": vwap,
+            "MACD": macd.iloc[-1],
+            "MACD_Signal": signal.iloc[-1],
+            "Volume_Trend_Up": vol_trend
         })
 
     except Exception as e:
-        print(f"Error processing {ticker}: {e}")
+        print(f"❌ Error processing {ticker}: {e}")
 
-enriched_df = pd.DataFrame(enriched_rows)
-final_df = pd.merge(df, enriched_df, on="Ticker", how="inner")
-final_df.to_csv(output_file, index=False)
+# Create enrichment DataFrame
+df_enriched = pd.DataFrame(enriched_rows)
 
-print(f"✅ Screener enrichment complete! Saved to {output_file}.")
+# Merge with original screener (Change% + RVOL)
+df_final = pd.merge(df_input, df_enriched, on="Ticker", how="inner")
+df_final.to_csv(output_file, index=False)
+
+print(f"✅ Enrichment complete. Saved to {output_file}")
