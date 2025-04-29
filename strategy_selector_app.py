@@ -36,42 +36,38 @@ st.caption("Auto-updated daily • Powered by NZDaveyboy 🚀")
 
 csv_path = "screened_stocks_intraday.csv"
 
-# --- Load data
-if os.path.exists(csv_path):
-    st.success(f"✅ Found {csv_path}")
-
-    try:
+# --- Try loading data
+try:
+    st.info(f"📂 Trying to load {csv_path}...")
+    
+    if os.path.exists(csv_path):
         df = pd.read_csv(csv_path)
+        st.success(f"✅ Loaded CSV successfully!")
 
-        # Validate if essential columns exist
-        if all(col in df.columns for col in ["Ticker", "Change%", "RVOL"]):
+        st.write("🔍 CSV Columns Detected:", df.columns.tolist())
+        st.dataframe(df)
 
-            if os.path.exists(tickers_file):
-                with open(tickers_file, "r") as file:
-                    selected_tickers = [line.strip() for line in file]
+        if os.path.exists(tickers_file):
+            with open(tickers_file, "r") as file:
+                selected_tickers = [line.strip() for line in file]
 
-                df = df[df["Ticker"].isin(selected_tickers)]
+            df = df[df["Ticker"].isin(selected_tickers)]
+            st.info(f"✅ Filtered {len(df)} rows matching selected tickers.")
 
-            # Apply user filters
-            filtered_df = df[(df["Change%"] >= min_change) & (df["RVOL"] >= min_rvol)]
+        filtered_df = df[(df["Change%"] >= min_change) & (df["RVOL"] >= min_rvol)]
 
+        if not filtered_df.empty:
             st.subheader("🔎 Screener Results")
             st.dataframe(filtered_df, use_container_width=True)
-
-            if not filtered_df.empty:
-                st.subheader("🚀 Top Movers")
-                st.bar_chart(filtered_df.set_index("Ticker")["Change%"])
-            else:
-                st.warning("⚠️ No stocks meet the current filters today.")
-
+            st.subheader("🚀 Top Movers")
+            st.bar_chart(filtered_df.set_index("Ticker")["Change%"])
         else:
-            st.error("❌ CSV is missing required columns: Ticker, Change%, RVOL")
-    
-    except Exception as e:
-        st.error(f"❌ Error loading CSV: {e}")
+            st.warning("⚠️ No stocks meet your current filter settings.")
+    else:
+        st.error(f"❌ File {csv_path} not found.")
 
-else:
-    st.warning("⚠️ No screener results found yet. Please check after the next automation run.")
+except Exception as e:
+    st.error(f"❌ Unexpected error: {e}")
 
 # --- Footer
 st.sidebar.markdown("---")
