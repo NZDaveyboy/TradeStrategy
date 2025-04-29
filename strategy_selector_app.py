@@ -34,7 +34,7 @@ min_rvol = st.sidebar.slider("Minimum RVOL", 0.0, 20.0, 0.0, 0.1)
 st.title(f"📈 {strategy}")
 st.caption("Auto-updated daily • Powered by NZDaveyboy 🚀")
 
-csv_path = "screened_stocks_intraday.csv"
+csv_path = "screened_stocks_enriched.csv"
 
 # --- Try loading data
 try:
