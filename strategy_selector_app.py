@@ -27,8 +27,8 @@ ticker_files = {
 tickers_file = ticker_files.get(strategy, "tickers.txt")
 
 st.sidebar.header("🔍 Filter Settings")
-min_change = st.sidebar.slider("Minimum % Change", 0, 100, 10, 1)
-min_rvol = st.sidebar.slider("Minimum RVOL", 0.0, 20.0, 3.0, 0.1)
+min_change = st.sidebar.slider("Minimum % Change", 0, 100, 0, 1)
+min_rvol = st.sidebar.slider("Minimum RVOL", 0.0, 20.0, 0.0, 0.1)
 
 # --- MAIN AREA ---
 st.title(f"📈 {strategy}")
