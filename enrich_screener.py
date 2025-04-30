@@ -1,96 +1,98 @@
-import yfinance as yf
+import streamlit as st
 import pandas as pd
-import numpy as np
-import time
+import os
 
-# File paths
-input_file = "screened_stocks_intraday.csv"
-output_file = "screened_stocks_enriched.csv"
+# --- CONFIG ---
+st.set_page_config(
+    page_title="📈 Trading Strategy Screener",
+    page_icon="💹",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
 
-# Load original screener data
+# --- SIDEBAR ---
+st.sidebar.title("🎛 Strategy Selector")
+
+strategy = st.sidebar.selectbox(
+    "Choose Strategy:",
+    ("General Screener", "AI Supply Chain", "Top 10 Tech")
+)
+
+ticker_files = {
+    "General Screener": "tickers.txt",
+    "AI Supply Chain": "tickers_ai.txt",
+    "Top 10 Tech": "tickers_tech.txt"
+}
+
+tickers_file = ticker_files.get(strategy, "tickers.txt")
+
+st.sidebar.header("🔍 Screener Filters")
+min_change = st.sidebar.slider("Minimum % Change", 0, 100, 0, 1)
+min_rvol = st.sidebar.slider("Minimum RVOL", 0.0, 20.0, 0.0, 0.1)
+
+# --- TECHNICAL FILTERS ---
+st.sidebar.header("📊 Technical Filters")
+filter_macd_cross = st.sidebar.checkbox("MACD > Signal Line", value=False)
+filter_ema_stack = st.sidebar.checkbox("EMA Stacked (9 > 20 > 200)", value=False)
+filter_vwap = st.sidebar.checkbox("Close > VWAP", value=False)
+filter_volume = st.sidebar.checkbox("Volume Trend Up", value=False)
+
+# --- MAIN AREA ---
+st.title(f"📊 {strategy} Strategy Screener")
+st.caption("Auto-updated with enrichment • Powered by NZDaveyboy 🚀")
+
+csv_path = "screened_stocks_enriched.csv"
+
 try:
-    df_input = pd.read_csv(input_file)
-except FileNotFoundError:
-    print(f"❌ Input file not found: {input_file}")
-    exit(1)
+    if os.path.exists(csv_path):
+        df = pd.read_csv(csv_path)
 
-# Load tickers from all strategy files
-ticker_files = ["tickers.txt", "tickers_ai.txt", "tickers_tech.txt"]
-all_tickers = set()
+        if os.path.exists(tickers_file):
+            with open(tickers_file, "r") as file:
+                selected_tickers = [line.strip() for line in file]
+            df = df[df["Ticker"].isin(selected_tickers)]
 
-for file in ticker_files:
-    try:
-        with open(file, "r") as f:
-            tickers = [line.strip() for line in f.readlines() if line.strip()]
-            all_tickers.update(tickers)
-    except FileNotFoundError:
-        print(f"⚠️ File not found: {file} — skipping.")
+        # Basic filters
+        filtered_df = df[(df["Change%"] >= min_change) & (df["RVOL"] >= min_rvol)]
 
-all_tickers = sorted(all_tickers)
-print(f"🧠 Unique tickers to enrich: {all_tickers}")
+        # Apply technical filters
+        if filter_macd_cross:
+            filtered_df = filtered_df[filtered_df["MACD"] > filtered_df["MACD_Signal"]]
 
-# Enrich each ticker
-enriched_rows = []
+        if filter_ema_stack:
+            filtered_df = filtered_df[
+                (filtered_df["EMA_9"] > filtered_df["EMA_20"]) &
+                (filtered_df["EMA_20"] > filtered_df["EMA_200"])
+            ]
 
-for ticker in all_tickers:
-    try:
-        data = yf.download(ticker, period="15d", interval="1d", progress=False)
+        if filter_vwap:
+            filtered_df = filtered_df[filtered_df["Last_Close"] > filtered_df["VWAP"]]
 
-        if data is None or data.shape[0] < 15:
-            print(f"⚠️ Not enough data for {ticker} — skipping.")
-            continue
+        if filter_volume:
+            filtered_df = filtered_df[filtered_df["Volume_Trend_Up"] == 1]
 
-        close = data["Close"]
-        volume = data["Volume"]
+        # Show results
+        st.subheader("🔎 Screener Results (Full View)")
+        if not filtered_df.empty:
+            st.dataframe(
+                filtered_df[
+                    [
+                        "Ticker", "Change%", "RVOL", "Last_Close",
+                        "EMA_9", "EMA_20", "EMA_200", "VWAP",
+                        "MACD", "MACD_Signal", "Volume_Trend_Up"
+                    ]
+                ],
+                use_container_width=True
+            )
 
-        # Safe conversions
-        last_close = float(close.iloc[-1]) if not close.empty else np.nan
-        ema_9 = close.ewm(span=9).mean().iloc[-1]
-        ema_20 = close.ewm(span=20).mean().iloc[-1]
-        ema_200 = close.ewm(span=200).mean().iloc[-1] if len(close) >= 200 else np.nan
-        vwap = (close * volume).sum() / volume.sum()
+            st.subheader("🚀 Top Movers")
+            st.bar_chart(filtered_df.set_index("Ticker")["Change%"])
 
-        # MACD
-        exp1 = close.ewm(span=12, adjust=False).mean()
-        exp2 = close.ewm(span=26, adjust=False).mean()
-        macd = exp1 - exp2
-        signal = macd.ewm(span=9, adjust=False).mean()
+        else:
+            st.warning("⚠️ No stocks match the current filter settings.")
 
-        # Volume trend (safe)
-        last_vol = float(volume.iloc[-1]) if not volume.empty else 0
-        avg_vol = float(volume.tail(15).mean()) if not volume.empty else 1
-        vol_trend = 1 if last_vol > avg_vol else 0
+    else:
+        st.error(f"❌ Enriched data file not found: {csv_path}")
 
-        enriched_rows.append({
-            "Ticker": ticker,
-            "Last_Close": last_close,
-            "EMA_9": ema_9,
-            "EMA_20": ema_20,
-            "EMA_200": ema_200,
-            "VWAP": vwap,
-            "MACD": macd.iloc[-1],
-            "MACD_Signal": signal.iloc[-1],
-            "Volume_Trend_Up": vol_trend
-        })
-
-        print(f"✅ Enriched {ticker}")
-        time.sleep(3)  # Avoid rate limits
-
-    except Exception as e:
-        print(f"❌ Error processing {ticker}: {type(e).__name__} — {e}")
-
-# Finalize enrichment
-df_enriched = pd.DataFrame(enriched_rows)
-
-if df_enriched.empty:
-    print("❌ No enriched data generated. Possibly due to rate limits or API errors.")
-    exit(1)
-
-# Merge with screener data (Change%, RVOL)
-try:
-    df_final = pd.merge(df_input, df_enriched, on="Ticker", how="inner")
-    df_final.to_csv(output_file, index=False)
-    print(f"✅ Screener enrichment complete. Saved to {output_file}")
 except Exception as e:
-    print(f"❌ Failed to merge and save: {type(e).__name__} — {e}")
-    exit(1)
+    st.error(f"❌ Unexpected error: {type(e).__name__} — {e}")
