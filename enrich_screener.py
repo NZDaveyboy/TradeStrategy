@@ -43,24 +43,27 @@ for ticker in all_tickers:
         close = data["Close"]
         volume = data["Volume"]
 
+        # Safe conversions
+        last_close = float(close.iloc[-1]) if not close.empty else np.nan
         ema_9 = close.ewm(span=9).mean().iloc[-1]
         ema_20 = close.ewm(span=20).mean().iloc[-1]
         ema_200 = close.ewm(span=200).mean().iloc[-1] if len(close) >= 200 else np.nan
+        vwap = (close * volume).sum() / volume.sum()
 
-        vwap = (data["Close"] * data["Volume"]).sum() / data["Volume"].sum()
-
+        # MACD
         exp1 = close.ewm(span=12, adjust=False).mean()
         exp2 = close.ewm(span=26, adjust=False).mean()
         macd = exp1 - exp2
         signal = macd.ewm(span=9, adjust=False).mean()
 
+        # Volume trend (safe)
         last_vol = float(volume.iloc[-1]) if not volume.empty else 0
-avg_vol = float(volume.tail(15).mean()) if not volume.empty else 1  # avoid div by 0
-vol_trend = 1 if last_vol > avg_vol else 0
-    
+        avg_vol = float(volume.tail(15).mean()) if not volume.empty else 1
+        vol_trend = 1 if last_vol > avg_vol else 0
+
         enriched_rows.append({
             "Ticker": ticker,
-            "Last_Close": float(close.iloc[-1]),
+            "Last_Close": last_close,
             "EMA_9": ema_9,
             "EMA_20": ema_20,
             "EMA_200": ema_200,
@@ -71,8 +74,7 @@ vol_trend = 1 if last_vol > avg_vol else 0
         })
 
         print(f"✅ Enriched {ticker}")
-
-        time.sleep(3)  # Avoid Yahoo rate limits
+        time.sleep(3)  # Avoid rate limits
 
     except Exception as e:
         print(f"❌ Error processing {ticker}: {type(e).__name__} — {e}")
@@ -84,8 +86,11 @@ if df_enriched.empty:
     print("❌ No enriched data generated. Possibly due to rate limits or API errors.")
     exit(1)
 
-# Merge with original data (RVOL, Change%)
-df_final = pd.merge(df_input, df_enriched, on="Ticker", how="inner")
-df_final.to_csv(output_file, index=False)
-
-print(f"✅ Screener enrichment complete. Saved to {output_file}")
+# Merge with screener data (Change%, RVOL)
+try:
+    df_final = pd.merge(df_input, df_enriched, on="Ticker", how="inner")
+    df_final.to_csv(output_file, index=False)
+    print(f"✅ Screener enrichment complete. Saved to {output_file}")
+except Exception as e:
+    print(f"❌ Failed to merge and save: {type(e).__name__} — {e}")
+    exit(1)
