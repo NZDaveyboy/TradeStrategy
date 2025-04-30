@@ -52,6 +52,12 @@ csv_path = "screened_stocks_enriched.csv"
 try:
     if os.path.exists(csv_path):
         df = pd.read_csv(csv_path)
+        # Convert key columns to numeric to avoid type comparison issues
+numeric_cols = [
+    "Change%", "RVOL", "Last_Close", "EMA_9", "EMA_20",
+    "EMA_200", "VWAP", "MACD", "MACD_Signal"
+]
+df[numeric_cols] = df[numeric_cols].apply(pd.to_numeric, errors='coerce')
 
         # Apply strategy-specific ticker filter
         if os.path.exists(tickers_file):
