@@ -4,7 +4,7 @@ NVDA    106.678207
 Name: 2025-04-29 00:00:00, dtype: float64","Ticker
 NVDA    106.212307
 Name: 2025-04-29 00:00:00, dtype: float64",,"Ticker
-NVDA    106.158323
+NVDA    106.162351
 dtype: float64","Ticker
 NVDA    2.544726
 Name: 2025-04-29 00:00:00, dtype: float64","Ticker
@@ -15,7 +15,7 @@ AMD    93.302016
 Name: 2025-04-29 00:00:00, dtype: float64","Ticker
 AMD    92.162529
 Name: 2025-04-29 00:00:00, dtype: float64",,"Ticker
-AMD    90.6831
+AMD    90.694451
 dtype: float64","Ticker
 AMD    3.991807
 Name: 2025-04-29 00:00:00, dtype: float64","Ticker
@@ -26,7 +26,7 @@ SMCI    34.681594
 Name: 2025-04-29 00:00:00, dtype: float64","Ticker
 SMCI    34.015238
 Name: 2025-04-29 00:00:00, dtype: float64",,"Ticker
-SMCI    33.785826
+SMCI    33.83126
 dtype: float64","Ticker
 SMCI    0.947276
 Name: 2025-04-29 00:00:00, dtype: float64","Ticker
@@ -37,7 +37,7 @@ TSM    160.004846
 Name: 2025-04-29 00:00:00, dtype: float64","Ticker
 TSM    157.850928
 Name: 2025-04-29 00:00:00, dtype: float64",,"Ticker
-TSM    154.887121
+TSM    154.955585
 dtype: float64","Ticker
 TSM    5.281175
 Name: 2025-04-29 00:00:00, dtype: float64","Ticker
@@ -48,7 +48,7 @@ AVGO    184.282209
 Name: 2025-04-29 00:00:00, dtype: float64","Ticker
 AVGO    181.043878
 Name: 2025-04-29 00:00:00, dtype: float64",,"Ticker
-AVGO    176.582331
+AVGO    176.645519
 dtype: float64","Ticker
 AVGO    7.953588
 Name: 2025-04-29 00:00:00, dtype: float64","Ticker
