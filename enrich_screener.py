@@ -1,14 +1,20 @@
 import yfinance as yf
 import pandas as pd
 import numpy as np
+import time
 
-# Load the original screener CSV
+# File paths
 input_file = "screened_stocks_intraday.csv"
 output_file = "screened_stocks_enriched.csv"
 
-df_input = pd.read_csv(input_file)
+# Load original screener data
+try:
+    df_input = pd.read_csv(input_file)
+except FileNotFoundError:
+    print(f"❌ Input file not found: {input_file}")
+    exit(1)
 
-# Combine all tickers from strategy files
+# Load tickers from all strategy files
 ticker_files = ["tickers.txt", "tickers_ai.txt", "tickers_tech.txt"]
 all_tickers = set()
 
@@ -20,7 +26,8 @@ for file in ticker_files:
     except FileNotFoundError:
         print(f"⚠️ File not found: {file} — skipping.")
 
-print(f"🧠 Unique tickers to enrich: {sorted(all_tickers)}")
+all_tickers = sorted(all_tickers)
+print(f"🧠 Unique tickers to enrich: {all_tickers}")
 
 # Enrich each ticker
 enriched_rows = []
@@ -47,11 +54,11 @@ for ticker in all_tickers:
         macd = exp1 - exp2
         signal = macd.ewm(span=9, adjust=False).mean()
 
-        vol_trend = 1 if volume[-1] > volume[-15:].mean() else 0
+        vol_trend = 1 if volume.iloc[-1] > volume.tail(15).mean() else 0
 
         enriched_rows.append({
             "Ticker": ticker,
-            "Last_Close": close.iloc[-1],
+            "Last_Close": float(close.iloc[-1]),
             "EMA_9": ema_9,
             "EMA_20": ema_20,
             "EMA_200": ema_200,
@@ -61,14 +68,22 @@ for ticker in all_tickers:
             "Volume_Trend_Up": vol_trend
         })
 
-    except Exception as e:
-        print(f"❌ Error processing {ticker}: {e}")
+        print(f"✅ Enriched {ticker}")
 
-# Create enrichment DataFrame
+        time.sleep(3)  # Avoid Yahoo rate limits
+
+    except Exception as e:
+        print(f"❌ Error processing {ticker}: {type(e).__name__} — {e}")
+
+# Finalize enrichment
 df_enriched = pd.DataFrame(enriched_rows)
 
-# Merge with original screener (Change% + RVOL)
+if df_enriched.empty:
+    print("❌ No enriched data generated. Possibly due to rate limits or API errors.")
+    exit(1)
+
+# Merge with original data (RVOL, Change%)
 df_final = pd.merge(df_input, df_enriched, on="Ticker", how="inner")
 df_final.to_csv(output_file, index=False)
 
-print(f"✅ Enrichment complete. Saved to {output_file}")
+print(f"✅ Screener enrichment complete. Saved to {output_file}")
