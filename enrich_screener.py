@@ -54,8 +54,10 @@ for ticker in all_tickers:
         macd = exp1 - exp2
         signal = macd.ewm(span=9, adjust=False).mean()
 
-        vol_trend = 1 if volume.iloc[-1] > volume.tail(15).mean() else 0
-
+        last_vol = float(volume.iloc[-1]) if not volume.empty else 0
+avg_vol = float(volume.tail(15).mean()) if not volume.empty else 1  # avoid div by 0
+vol_trend = 1 if last_vol > avg_vol else 0
+    
         enriched_rows.append({
             "Ticker": ticker,
             "Last_Close": float(close.iloc[-1]),
