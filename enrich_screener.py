@@ -36,7 +36,7 @@ for ticker in all_tickers:
     try:
         data = yf.download(ticker, period="15d", interval="1d", progress=False)
 
-        if data.empty or len(data) < 15:
+        if data is None or data.shape[0] < 15:
             print(f"⚠️ Not enough data for {ticker} — skipping.")
             continue
 
