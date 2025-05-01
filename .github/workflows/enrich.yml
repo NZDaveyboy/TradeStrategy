@@ -25,10 +25,11 @@ jobs:
       run: |
         python enrich_screener.py
 
-    - name: Commit and push results
-      run: |
-        git config user.name "github-actions"
-        git config user.email "github-actions@github.com"
-        git add screened_stocks_enriched.csv
-        git commit -m "Auto-enrich screener results" || echo "No changes to commit"
-        git push
+         - name: 📝 Commit and push results
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+          git pull --rebase origin main || true
+          git add screened_stocks_enriched.csv
+          git commit -m "Auto-enrich screener results" || echo "Nothing to commit"
+          git push origin main || echo "Push skipped"
