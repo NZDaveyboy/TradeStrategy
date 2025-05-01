@@ -7,19 +7,19 @@ dtype: float64","Ticker
 AAPL    212.5
 Name: 2025-04-30 00:00:00, dtype: float64",206.73,203.22,200.36,210.9,-1.1095,-3.7808,0,equity
 AAVE-USD,"Ticker
-AAVE-USD   -0.61
+AAVE-USD   -0.25
 dtype: float64","Ticker
-AAVE-USD    0.92
+AAVE-USD    0.93
 dtype: float64","Ticker
-AAVE-USD    164.8
-Name: 2025-05-01 00:00:00, dtype: float64",163.27,158.43,152.94,164.68,5.9467,4.1086,0,crypto
+AAVE-USD    165.39
+Name: 2025-05-01 00:00:00, dtype: float64",163.38,158.49,152.97,165.02,5.9935,4.118,0,crypto
 ADA-USD,"Ticker
-ADA-USD   -1.51
+ADA-USD   -1.38
 dtype: float64","Ticker
-ADA-USD    0.95
+ADA-USD    0.94
 dtype: float64","Ticker
 ADA-USD    0.69
-Name: 2025-05-01 00:00:00, dtype: float64",0.69,0.68,0.66,0.68,0.0138,0.0091,0,crypto
+Name: 2025-05-01 00:00:00, dtype: float64",0.69,0.68,0.66,0.69,0.0139,0.0091,0,crypto
 ADBE,"Ticker
 ADBE    1.08
 dtype: float64","Ticker
@@ -49,12 +49,12 @@ dtype: float64","Ticker
 AMZN    184.42
 Name: 2025-04-30 00:00:00, dtype: float64",183.41,181.73,180.74,182.77,-1.4187,-3.007,0,equity
 AR-USD,"Ticker
-AR-USD    3.14
+AR-USD    3.57
 dtype: float64","Ticker
 AR-USD    1.08
 dtype: float64","Ticker
-AR-USD    7.01
-Name: 2025-05-01 00:00:00, dtype: float64",6.7,6.38,6.05,6.98,0.3888,0.2587,0,crypto
+AR-USD    7.04
+Name: 2025-05-01 00:00:00, dtype: float64",6.7,6.39,6.05,6.99,0.3911,0.2592,0,crypto
 ASML,"Ticker
 ASML    0.3
 dtype: float64","Ticker
@@ -63,19 +63,19 @@ dtype: float64","Ticker
 ASML    668.08
 Name: 2025-04-30 00:00:00, dtype: float64",662.16,656.36,650.45,663.01,2.5863,-0.7468,0,equity
 ATOM-USD,"Ticker
-ATOM-USD   -1.61
+ATOM-USD   -1.27
 dtype: float64","Ticker
-ATOM-USD    0.79
+ATOM-USD    0.8
 dtype: float64","Ticker
-ATOM-USD    4.31
-Name: 2025-05-01 00:00:00, dtype: float64",4.38,4.34,4.28,4.31,0.0352,0.0194,0,crypto
+ATOM-USD    4.33
+Name: 2025-05-01 00:00:00, dtype: float64",4.38,4.34,4.28,4.32,0.0364,0.0196,0,crypto
 AVAX-USD,"Ticker
-AVAX-USD   -2.67
+AVAX-USD   -2.37
 dtype: float64","Ticker
 AVAX-USD    1.06
 dtype: float64","Ticker
-AVAX-USD    20.98
-Name: 2025-05-01 00:00:00, dtype: float64",21.46,21.15,20.73,20.96,0.4028,0.318,0,crypto
+AVAX-USD    21.04
+Name: 2025-05-01 00:00:00, dtype: float64",21.47,21.15,20.73,21.0,0.4079,0.3191,0,crypto
 AVGO,"Ticker
 AVGO    0.68
 dtype: float64","Ticker
@@ -91,12 +91,12 @@ dtype: float64","Ticker
 BBAI    3.41
 Name: 2025-04-30 00:00:00, dtype: float64",3.18,3.02,2.92,3.36,0.0886,-0.0246,1,equity
 BTC-USD,"Ticker
-BTC-USD    0.03
+BTC-USD    0.11
 dtype: float64","Ticker
-BTC-USD    0.98
+BTC-USD    0.96
 dtype: float64","Ticker
-BTC-USD    94308.66
-Name: 2025-05-01 00:00:00, dtype: float64",93222.36,91474.35,89503.15,94271.03,2589.3459,1974.8978,0,crypto
+BTC-USD    94386.59
+Name: 2025-05-01 00:00:00, dtype: float64",93238.17,91483.08,89507.63,94322.55,2595.5625,1976.1411,0,crypto
 CRM,"Ticker
 CRM    0.35
 dtype: float64","Ticker
@@ -105,26 +105,26 @@ dtype: float64","Ticker
 CRM    268.71
 Name: 2025-04-30 00:00:00, dtype: float64",261.15,257.55,255.2,266.86,0.0441,-2.7703,0,equity
 DAI-USD,"Ticker
-DAI-USD   -0.01
+DAI-USD   -0.0
 dtype: float64","Ticker
 DAI-USD    0.4
 dtype: float64","Ticker
 DAI-USD    1.0
 Name: 2025-05-01 00:00:00, dtype: float64",1.0,1.0,1.0,1.0,-0.0,-0.0001,0,crypto
 DOT-USD,"Ticker
-DOT-USD   -1.39
+DOT-USD   -1.29
 dtype: float64","Ticker
-DOT-USD    0.89
+DOT-USD    0.9
 dtype: float64","Ticker
 DOT-USD    4.09
-Name: 2025-05-01 00:00:00, dtype: float64",4.11,4.03,3.93,4.08,0.1274,0.1043,0,crypto
+Name: 2025-05-01 00:00:00, dtype: float64",4.11,4.03,3.93,4.09,0.1278,0.1043,0,crypto
 ETH-USD,"Ticker
-ETH-USD   -0.14
+ETH-USD   -0.08
 dtype: float64","Ticker
-ETH-USD    1.03
+ETH-USD    0.99
 dtype: float64","Ticker
-ETH-USD    1796.6
-Name: 2025-05-01 00:00:00, dtype: float64",1770.73,1733.46,1694.04,1795.94,46.6356,31.3627,0,crypto
+ETH-USD    1797.68
+Name: 2025-05-01 00:00:00, dtype: float64",1770.95,1733.58,1694.1,1796.53,46.7217,31.3799,0,crypto
 GOOGL,"Ticker
 GOOGL   -0.85
 dtype: float64","Ticker
@@ -140,19 +140,19 @@ dtype: float64","Ticker
 INTC    20.1
 Name: 2025-04-30 00:00:00, dtype: float64",20.19,20.12,20.13,19.94,-0.2977,-0.4187,0,equity
 LDO-USD,"Ticker
-LDO-USD    1.13
+LDO-USD    1.55
 dtype: float64","Ticker
 LDO-USD    1.05
 dtype: float64","Ticker
 LDO-USD    0.84
-Name: 2025-05-01 00:00:00, dtype: float64",0.82,0.8,0.77,0.83,0.0272,0.017,0,crypto
+Name: 2025-05-01 00:00:00, dtype: float64",0.82,0.8,0.77,0.84,0.0275,0.017,0,crypto
 LINK-USD,"Ticker
-LINK-USD   -1.42
+LINK-USD   -1.18
 dtype: float64","Ticker
 LINK-USD    0.9
 dtype: float64","Ticker
-LINK-USD    14.41
-Name: 2025-05-01 00:00:00, dtype: float64",14.47,14.14,13.73,14.37,0.4682,0.3586,0,crypto
+LINK-USD    14.44
+Name: 2025-05-01 00:00:00, dtype: float64",14.48,14.14,13.74,14.39,0.4709,0.3592,0,crypto
 META,"Ticker
 META   -0.98
 dtype: float64","Ticker
@@ -175,12 +175,12 @@ dtype: float64","Ticker
 MU    76.95
 Name: 2025-04-30 00:00:00, dtype: float64",75.37,73.92,73.0,75.86,-1.6146,-3.0074,0,equity
 NEAR-USD,"Ticker
-NEAR-USD   -1.93
+NEAR-USD   -1.76
 dtype: float64","Ticker
 NEAR-USD    0.84
 dtype: float64","Ticker
-NEAR-USD    2.48
-Name: 2025-05-01 00:00:00, dtype: float64",2.48,2.41,2.32,2.48,0.0991,0.0724,0,crypto
+NEAR-USD    2.49
+Name: 2025-05-01 00:00:00, dtype: float64",2.48,2.41,2.32,2.48,0.0995,0.0725,0,crypto
 NVDA,"Ticker
 NVDA   -0.09
 dtype: float64","Ticker
@@ -210,12 +210,12 @@ dtype: float64","Ticker
 SMCI    31.86
 Name: 2025-04-30 00:00:00, dtype: float64",34.07,33.66,33.33,30.88,0.0521,-0.2236,1,equity
 SOL-USD,"Ticker
-SOL-USD    0.96
+SOL-USD    1.09
 dtype: float64","Ticker
-SOL-USD    0.88
+SOL-USD    0.89
 dtype: float64","Ticker
-SOL-USD    147.83
-Name: 2025-05-01 00:00:00, dtype: float64",146.83,144.37,141.13,147.91,4.4089,3.8422,0,crypto
+SOL-USD    148.03
+Name: 2025-05-01 00:00:00, dtype: float64",146.87,144.39,141.14,147.98,4.4249,3.8454,0,crypto
 TSLA,"Ticker
 TSLA   -3.38
 dtype: float64","Ticker
@@ -238,7 +238,7 @@ dtype: float64","Ticker
 UPST    47.8
 Name: 2025-04-30 00:00:00, dtype: float64",45.9,43.97,42.29,47.24,0.7931,-0.4005,0,equity
 USDC-USD,"Ticker
-USDC-USD    0.0
+USDC-USD   -0.0
 dtype: float64","Ticker
 USDC-USD    1.05
 dtype: float64","Ticker
