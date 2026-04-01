@@ -1,64 +1,106 @@
-import streamlit as st
-import pandas as pd
 import os
+import sqlite3
 
-# Set page config
-st.set_page_config(
-    page_title="📈 Trade Strategy Screener Dashboard",
-    page_icon="🚀",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
+import pandas as pd
+import streamlit as st
+
+DB_PATH = os.path.join(os.path.dirname(__file__), "screener.db")
+
+st.set_page_config(page_title="TradeStrategy Screener", layout="wide")
+st.title("TradeStrategy Screener")
+
+if not os.path.exists(DB_PATH):
+    st.error("No data yet. Run `python run.py` first.")
+    st.stop()
+
+conn = sqlite3.connect(DB_PATH)
+dates = pd.read_sql(
+    "SELECT DISTINCT run_date FROM results ORDER BY run_date DESC", conn
+)["run_date"].tolist()
+conn.close()
+
+if not dates:
+    st.warning("No results in database yet.")
+    st.stop()
 
 # --- Sidebar ---
 with st.sidebar:
-    st.title("⚙️ Dashboard Settings")
-    st.markdown("Tune your filters below 👇")
+    st.header("Filters")
+    selected_date = st.selectbox("Date", dates)
 
-# --- Main Page ---
-st.title("📈 Trade Strategy Screener Dashboard")
-st.caption("Welcome to your live, auto-updating trade setup dashboard! 🚀")
+    conn = sqlite3.connect(DB_PATH)
+    strategies = pd.read_sql(
+        "SELECT DISTINCT strategy FROM results WHERE run_date = ?",
+        conn, params=(selected_date,)
+    )["strategy"].tolist()
+    conn.close()
 
-st.markdown("""
-This dashboard scans stocks based on your trading strategy:
-- RVOL above 3
-- Price gains over 10%
-- EMA alignment (9 > 20 > 200)
-- RSI < 70
-- ATR-based dynamic stop
+    strategy_options = ["All"] + sorted(strategies)
+    strategy = st.selectbox("Strategy", strategy_options)
+    asset_filter = st.selectbox("Asset type", ["All", "equity", "crypto"])
+    min_score = st.slider("Min score (0–4)", 0, 4, 0)
+    min_change = st.slider("Min change %", 0, 100, 0)
+    min_rvol = st.slider("Min RVOL", 0.0, 20.0, 0.0, 0.5)
 
-The stocks shown here are refreshed daily — ready for you to review!
-""")
+# --- Load data ---
+conn = sqlite3.connect(DB_PATH)
+df = pd.read_sql(
+    "SELECT * FROM results WHERE run_date = ?", conn, params=(selected_date,)
+)
+conn.close()
 
-# Load CSV
-csv_path = "outputs/screened_stocks_intraday.csv"
+if strategy != "All":
+    df = df[df["strategy"] == strategy]
+if asset_filter != "All":
+    df = df[df["asset"] == asset_filter]
 
-if os.path.exists(csv_path):
-    df = pd.read_csv(csv_path)
+df = df[
+    (df["score"] >= min_score)
+    & (df["change_pct"] >= min_change)
+    & (df["rvol"] >= min_rvol)
+].sort_values(["score", "change_pct"], ascending=False)
 
-    st.success(f"✅ Loaded {len(df)} screened stocks today!")
+# --- Display ---
+st.caption(f"{len(df)} candidates  •  {selected_date}")
 
-    # --- Filters ---
-    st.sidebar.header("📊 Filter Stocks")
-    min_change = st.sidebar.slider("Minimum % Change", min_value=0, max_value=100, value=10, step=1)
-    min_rvol = st.sidebar.slider("Minimum RVOL", min_value=0.0, max_value=20.0, value=3.0, step=0.1)
-
-    filtered_df = df[(df["Change%"] >= min_change) & (df["RVOL"] >= min_rvol)]
-
-    # --- Dataframe ---
-    st.subheader("🔎 Screener Results")
-    st.dataframe(filtered_df, use_container_width=True)
-
-    # --- Chart ---
-    if not filtered_df.empty:
-        st.subheader("🚀 Top Movers by % Change")
-        top_movers = filtered_df.sort_values(by="Change%", ascending=False)
-        st.bar_chart(top_movers.set_index("Ticker")["Change%"])
-    else:
-        st.warning("⚠️ No stocks meet your filter criteria today.")
+if df.empty:
+    st.info("No stocks match the current filters.")
 else:
-    st.warning("⚠️ No results file found. Please check again after the next automation run.")
+    st.dataframe(
+        df[[
+            "ticker", "score", "strategy", "asset",
+            "price", "change_pct", "rvol", "rsi",
+            "ema9", "ema20", "ema200",
+            "macd", "macd_signal", "vwap",
+            "stop_loss", "volume_trend_up",
+        ]],
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "score":           st.column_config.NumberColumn("Score", format="%d/4"),
+            "change_pct":      st.column_config.NumberColumn("Change %", format="%.2f%%"),
+            "rvol":            st.column_config.NumberColumn("RVOL", format="%.2fx"),
+            "volume_trend_up": st.column_config.CheckboxColumn("Vol↑"),
+        },
+    )
 
-# --- Footer ---
-st.sidebar.markdown("---")
-st.sidebar.caption("Powered by NZDaveyboy 🚀 | Auto-updated daily.")
+    st.subheader("Top movers")
+    st.bar_chart(df.set_index("ticker")["change_pct"].head(20))
+
+# --- Historical summary ---
+with st.expander("Run history"):
+    conn = sqlite3.connect(DB_PATH)
+    history = pd.read_sql(
+        """
+        SELECT run_date,
+               COUNT(*)                        AS candidates,
+               ROUND(AVG(score), 1)            AS avg_score,
+               ROUND(MAX(change_pct), 1)       AS best_change_pct
+        FROM results
+        GROUP BY run_date
+        ORDER BY run_date DESC
+        """,
+        conn,
+    )
+    conn.close()
+    st.dataframe(history, use_container_width=True, hide_index=True)

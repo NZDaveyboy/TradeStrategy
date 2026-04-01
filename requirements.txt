@@ -1,4 +1,4 @@
-yfinance
+yfinance>=0.2
 pandas
 beautifulsoup4
 requests

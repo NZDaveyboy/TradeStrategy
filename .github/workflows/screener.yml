@@ -1,0 +1,34 @@
+name: Run Screener
+
+# Manual trigger only.
+# For automated daily runs, set up a cron job on a VPS or local machine:
+#   0 13 * * 1-5  cd /path/to/TradeStrategy && python run.py
+#
+# GitHub Actions is not ideal for this — it can't host a persistent DB,
+# so results would need to be committed back to the repo. Run locally instead.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  screen:
+    runs-on: ubuntu-22.04
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - run: pip install -r requirements.txt
+
+      - run: python run.py
+
+      - name: Commit results
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+          git add screener.db
+          git commit -m "Screener run $(date +%Y-%m-%d)" || echo "Nothing to commit"
+          git push
