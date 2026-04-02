@@ -1,0 +1,51 @@
+name: Pre-market Scan
+
+# Runs at 9:00am and 9:45am EST (UTC-5) on US trading days.
+# During EDT (Mar–Nov, UTC-4) these fire at 10:00am and 10:45am ET instead —
+# still useful for early-session confirmation after the open.
+# To align with EDT, change 14 → 13 in both cron expressions.
+#
+# Required repository secrets (Settings → Secrets → Actions):
+#   TELEGRAM_BOT_TOKEN   — from @BotFather on Telegram
+#   TELEGRAM_CHAT_ID     — your personal chat ID or channel ID
+
+on:
+  schedule:
+    - cron: '0 14 * * 1-5'    # 9:00am EST  (Mon-Fri)
+    - cron: '45 14 * * 1-5'   # 9:45am EST  (Mon-Fri)
+  workflow_dispatch:            # manual run for testing
+
+jobs:
+  scan:
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run pre-market scanner
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python scan_premarket.py
+
+      - name: Commit updated database
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add screener.db
+          git diff --staged --quiet \
+            && echo "No changes to commit." \
+            || git commit -m "alerts: scan $(date -u +'%Y-%m-%d %H:%M UTC')"
+          git push

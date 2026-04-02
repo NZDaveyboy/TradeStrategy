@@ -24,9 +24,10 @@ from bs4 import BeautifulSoup
 DB_PATH = os.path.join(os.path.dirname(__file__), "screener.db")
 
 STRATEGY_FILES = {
-    "ai":     "tickers_ai.txt",
-    "tech":   "tickers_tech.txt",
-    "crypto": "tickers_crypto.txt",
+    "ai":       "tickers_ai.txt",
+    "tech":     "tickers_tech.txt",
+    "crypto":   "tickers_crypto.txt",
+    "momentum": "tickers_momentum.txt",
 }
 
 # Momentum filters applied to Finviz top gainers only.
@@ -64,9 +65,17 @@ def init_db():
             vwap             REAL,
             volume_trend_up  INTEGER,
             score            INTEGER,
+            market_cap       REAL,
+            float_shares     REAL,
             PRIMARY KEY (run_date, ticker)
         )
     """)
+    # Migrate existing DBs that pre-date the new columns
+    for col, col_type in [("market_cap", "REAL"), ("float_shares", "REAL")]:
+        try:
+            conn.execute(f"ALTER TABLE results ADD COLUMN {col} {col_type}")
+        except Exception:
+            pass  # column already exists
     conn.commit()
     conn.close()
 
@@ -77,7 +86,7 @@ def save_results(run_date: str, rows: list[dict]):
         conn.execute(
             """
             INSERT OR REPLACE INTO results VALUES
-            (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """,
             (
                 run_date, r["ticker"], r["strategy"], r["asset"],
@@ -86,6 +95,7 @@ def save_results(run_date: str, rows: list[dict]):
                 r["rsi"], r["atr"], r["stop_loss"],
                 r["macd"], r["macd_signal"], r["vwap"],
                 r["volume_trend_up"], r["score"],
+                r.get("market_cap"), r.get("float_shares"),
             ),
         )
     conn.commit()
@@ -170,7 +180,8 @@ def atr(data: pd.DataFrame, period: int = 14) -> float:
 # ---------------------------------------------------------------------------
 
 def screen_ticker(ticker: str, strategy: str) -> dict | None:
-    data = yf.Ticker(ticker).history(period="1y", interval="1d")
+    tk   = yf.Ticker(ticker)
+    data = tk.history(period="1y", interval="1d")
     if len(data) < 20:
         return None
 
@@ -185,6 +196,9 @@ def screen_ticker(ticker: str, strategy: str) -> dict | None:
     rsi_val = rsi(close)
     atr_val = atr(data)
 
+    market_cap   = None
+    float_shares = None
+
     # Finviz top gainers are filtered strictly; curated lists always pass
     if strategy == "general" and not (
         rvol   >= FILTER_MIN_RVOL
@@ -194,6 +208,18 @@ def screen_ticker(ticker: str, strategy: str) -> dict | None:
         and rsi_val < FILTER_MAX_RSI
     ):
         return None
+
+    if strategy == "momentum":
+        info         = tk.info
+        market_cap   = info.get("marketCap")
+        float_shares = info.get("floatShares")
+        if not (
+            market_cap   and market_cap   < 2_000_000_000
+            and float_shares and float_shares < 50_000_000
+            and rvol   >= 2.0
+            and change >= 5.0
+        ):
+            return None
 
     exp1   = close.ewm(span=12, adjust=False).mean()
     exp2   = close.ewm(span=26, adjust=False).mean()
@@ -233,6 +259,8 @@ def screen_ticker(ticker: str, strategy: str) -> dict | None:
         "vwap":            round(vwap, 2),
         "volume_trend_up": volume_trend_up,
         "score":           score,
+        "market_cap":      market_cap,
+        "float_shares":    float_shares,
     }
 
 
