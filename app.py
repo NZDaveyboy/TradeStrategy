@@ -544,12 +544,6 @@ with tab_tracker:
 
 with tab_alerts:
 
-    ALERT_COLORS = {
-        "rvol":     "#ff6b35",
-        "change":   "#4ecdc4",
-        "gap_up":   "#2ecc71",
-        "gap_down": "#e74c3c",
-    }
     ALERT_LABELS = {
         "rvol":     "RVOL",
         "change":   "Change",
@@ -557,132 +551,93 @@ with tab_alerts:
         "gap_down": "Gap Down",
     }
 
-    conn = get_conn()
-    alerts_exist = conn.execute(
-        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='alerts'"
-    ).fetchone()[0]
+    ALERTS_CSV = os.path.join(os.path.dirname(__file__), "alerts.csv")
 
-    if not alerts_exist:
-        conn.close()
-        st.info("No alerts table yet. The scanner will create it on first run.")
+    if not os.path.exists(ALERTS_CSV):
+        st.info("No alerts yet. The scanner will create alerts.csv on first run.")
     else:
-        # Summary counts
-        today_str = pd.Timestamp.now().strftime("%Y-%m-%d")
+        all_alerts = pd.read_csv(ALERTS_CSV)
 
-        total_alerts = conn.execute("SELECT COUNT(*) FROM alerts").fetchone()[0]
-        today_alerts = conn.execute(
-            "SELECT COUNT(*) FROM alerts WHERE scan_date = ?", (today_str,)
-        ).fetchone()[0]
-        distinct_tickers_today = conn.execute(
-            "SELECT COUNT(DISTINCT ticker) FROM alerts WHERE scan_date = ?", (today_str,)
-        ).fetchone()[0]
-        last_scan = conn.execute(
-            "SELECT triggered_at FROM alerts ORDER BY id DESC LIMIT 1"
-        ).fetchone()
-        last_scan_str = last_scan[0] if last_scan else "Never"
-
-        conn.close()
-
-        # Metrics row
-        m1, m2, m3, m4 = st.columns(4)
-        m1.metric("Alerts today",         today_alerts)
-        m2.metric("Tickers flagged today", distinct_tickers_today)
-        m3.metric("Total alerts (all time)", total_alerts)
-        m4.metric("Last scan", last_scan_str)
-
-        st.divider()
-
-        # Filters
-        conn = get_conn()
-        all_dates = pd.read_sql(
-            "SELECT DISTINCT scan_date FROM alerts ORDER BY scan_date DESC", conn
-        )["scan_date"].tolist()
-        all_tickers = pd.read_sql(
-            "SELECT DISTINCT ticker FROM alerts ORDER BY ticker", conn
-        )["ticker"].tolist()
-        conn.close()
-
-        f1, f2, f3 = st.columns(3)
-        date_filter   = f1.selectbox("Date", ["All"] + all_dates)
-        ticker_filter = f2.selectbox("Ticker", ["All"] + all_tickers)
-        type_filter   = f3.selectbox(
-            "Alert type", ["All", "rvol", "change", "gap_up", "gap_down"]
-        )
-
-        # Load filtered alerts
-        query  = "SELECT * FROM alerts WHERE 1=1"
-        params: list = []
-        if date_filter != "All":
-            query += " AND scan_date = ?"
-            params.append(date_filter)
-        if ticker_filter != "All":
-            query += " AND ticker = ?"
-            params.append(ticker_filter)
-        if type_filter != "All":
-            query += " AND alert_type = ?"
-            params.append(type_filter)
-        query += " ORDER BY id DESC"
-
-        conn = get_conn()
-        alerts_df = pd.read_sql(query, conn, params=params)
-        conn.close()
-
-        st.caption(f"{len(alerts_df)} alert(s) matching filters")
-
-        if alerts_df.empty:
-            st.info("No alerts match the current filters.")
+        if all_alerts.empty:
+            st.info("No alerts yet.")
         else:
-            # Friendly label column
-            alerts_df["type_label"] = alerts_df["alert_type"].map(ALERT_LABELS).fillna(alerts_df["alert_type"])
+            today_str = pd.Timestamp.now().strftime("%Y-%m-%d")
+            today_df  = all_alerts[all_alerts["scan_date"] == today_str]
 
-            display_df = alerts_df[[
-                "scan_date", "scan_window", "ticker",
-                "type_label", "value", "price",
-                "change_pct", "rvol", "gap_pct",
-            ]].copy()
-            display_df.columns = [
-                "Date", "Window", "Ticker",
-                "Alert", "Value", "Price",
-                "Change %", "RVOL", "Gap %",
-            ]
+            # Metrics row
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric("Alerts today",            len(today_df))
+            m2.metric("Tickers flagged today",   today_df["ticker"].nunique())
+            m3.metric("Total alerts (all time)", len(all_alerts))
+            m4.metric("Last scan",               all_alerts["triggered_at"].iloc[-1])
 
-            st.dataframe(
-                display_df,
-                use_container_width=True,
-                hide_index=True,
-                column_config={
-                    "Change %": st.column_config.NumberColumn("Change %", format="%.2f%%"),
-                    "RVOL":     st.column_config.NumberColumn("RVOL",     format="%.2fx"),
-                    "Gap %":    st.column_config.NumberColumn("Gap %",    format="%.2f%%"),
-                    "Price":    st.column_config.NumberColumn("Price",    format="$%.4f"),
-                    "Value":    st.column_config.NumberColumn("Value",    format="%.2f"),
-                },
-            )
+            st.divider()
 
-            # Alert type breakdown chart
-            if len(alerts_df) > 1:
-                st.subheader("Alert breakdown")
-                breakdown = (
-                    alerts_df.groupby("type_label")
-                    .size()
-                    .reset_index(name="count")
-                    .set_index("type_label")
+            # Filters
+            f1, f2, f3 = st.columns(3)
+            date_filter   = f1.selectbox("Date",   ["All"] + sorted(all_alerts["scan_date"].unique().tolist(), reverse=True))
+            ticker_filter = f2.selectbox("Ticker", ["All"] + sorted(all_alerts["ticker"].unique().tolist()))
+            type_filter   = f3.selectbox("Alert type", ["All", "rvol", "change", "gap_up", "gap_down"])
+
+            filtered = all_alerts.copy()
+            if date_filter   != "All":
+                filtered = filtered[filtered["scan_date"]  == date_filter]
+            if ticker_filter != "All":
+                filtered = filtered[filtered["ticker"]     == ticker_filter]
+            if type_filter   != "All":
+                filtered = filtered[filtered["alert_type"] == type_filter]
+            filtered = filtered.iloc[::-1].reset_index(drop=True)  # newest first
+
+            st.caption(f"{len(filtered)} alert(s) matching filters")
+
+            if filtered.empty:
+                st.info("No alerts match the current filters.")
+            else:
+                filtered["Alert"] = filtered["alert_type"].map(ALERT_LABELS).fillna(filtered["alert_type"])
+
+                display_df = filtered[[
+                    "scan_date", "scan_window", "ticker",
+                    "Alert", "value", "price",
+                    "change_pct", "rvol", "gap_pct",
+                ]].copy()
+                display_df.columns = [
+                    "Date", "Window", "Ticker",
+                    "Alert", "Value", "Price",
+                    "Change %", "RVOL", "Gap %",
+                ]
+
+                st.dataframe(
+                    display_df,
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config={
+                        "Change %": st.column_config.NumberColumn("Change %", format="%.2f%%"),
+                        "RVOL":     st.column_config.NumberColumn("RVOL",     format="%.2fx"),
+                        "Gap %":    st.column_config.NumberColumn("Gap %",    format="%.2f%%"),
+                        "Price":    st.column_config.NumberColumn("Price",    format="$%.4f"),
+                        "Value":    st.column_config.NumberColumn("Value",    format="%.2f"),
+                    },
                 )
-                st.bar_chart(breakdown["count"])
 
-        with st.expander("All-time ticker frequency"):
-            conn = get_conn()
-            freq_df = pd.read_sql(
-                """
-                SELECT ticker,
-                       COUNT(*)                          AS total_alerts,
-                       COUNT(DISTINCT scan_date)         AS days_flagged,
-                       MAX(scan_date)                    AS last_flagged
-                FROM alerts
-                GROUP BY ticker
-                ORDER BY total_alerts DESC
-                """,
-                conn,
-            )
-            conn.close()
-            st.dataframe(freq_df, use_container_width=True, hide_index=True)
+                if len(filtered) > 1:
+                    st.subheader("Alert breakdown")
+                    breakdown = (
+                        filtered.groupby("Alert")
+                        .size()
+                        .reset_index(name="count")
+                        .set_index("Alert")
+                    )
+                    st.bar_chart(breakdown["count"])
+
+            with st.expander("All-time ticker frequency"):
+                freq = (
+                    all_alerts.groupby("ticker")
+                    .agg(
+                        total_alerts=("alert_type", "count"),
+                        days_flagged=("scan_date",  "nunique"),
+                        last_flagged=("scan_date",  "max"),
+                    )
+                    .sort_values("total_alerts", ascending=False)
+                    .reset_index()
+                )
+                st.dataframe(freq, use_container_width=True, hide_index=True)

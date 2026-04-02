@@ -10,15 +10,15 @@ Alert triggers (any one is sufficient):
   - |price change| >= 5%  (current price vs previous close)
   - |gap| >= 3%  (today's open vs previous close)
 
-Sends a single grouped Telegram message and logs all alerts to screener.db.
+Sends a single grouped Telegram message and appends all alerts to alerts.csv.
 
 Required environment variables (set as GitHub Actions secrets):
   TELEGRAM_BOT_TOKEN  — token from @BotFather
   TELEGRAM_CHAT_ID    — your chat or channel ID
 """
 
+import csv
 import os
-import sqlite3
 import time
 from datetime import datetime, timezone
 
@@ -29,8 +29,14 @@ import yfinance as yf
 # Config
 # ---------------------------------------------------------------------------
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DB_PATH  = os.path.join(BASE_DIR, "screener.db")
+BASE_DIR  = os.path.dirname(os.path.abspath(__file__))
+CSV_PATH  = os.path.join(BASE_DIR, "alerts.csv")
+
+CSV_FIELDS = [
+    "triggered_at", "scan_date", "scan_window",
+    "ticker", "alert_type", "value",
+    "price", "change_pct", "rvol", "gap_pct",
+]
 
 TELEGRAM_TOKEN  = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHATID = os.environ.get("TELEGRAM_CHAT_ID", "")
@@ -43,46 +49,29 @@ WATCHLISTS = ["tickers_tech.txt", "tickers_ai.txt"]
 
 
 # ---------------------------------------------------------------------------
-# Database
+# CSV storage
 # ---------------------------------------------------------------------------
 
-def init_alerts_table():
-    conn = sqlite3.connect(DB_PATH)
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS alerts (
-            id           INTEGER PRIMARY KEY AUTOINCREMENT,
-            triggered_at TEXT NOT NULL,
-            scan_date    TEXT NOT NULL,
-            scan_window  TEXT NOT NULL,
-            ticker       TEXT NOT NULL,
-            alert_type   TEXT NOT NULL,
-            value        REAL NOT NULL,
-            price        REAL,
-            change_pct   REAL,
-            rvol         REAL,
-            gap_pct      REAL
-        )
-    """)
-    conn.commit()
-    conn.close()
-
-
-def save_alerts(scan_dt: str, scan_date: str, scan_window: str, alerts: list[dict]):
-    conn = sqlite3.connect(DB_PATH)
-    for a in alerts:
-        for atype, aval in a["triggers"]:
-            conn.execute(
-                """
-                INSERT INTO alerts
-                    (triggered_at, scan_date, scan_window, ticker,
-                     alert_type, value, price, change_pct, rvol, gap_pct)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (scan_dt, scan_date, scan_window, a["ticker"],
-                 atype, aval, a["price"], a["change_pct"], a["rvol"], a["gap_pct"]),
-            )
-    conn.commit()
-    conn.close()
+def save_alerts_csv(scan_dt: str, scan_date: str, scan_window: str, alerts: list[dict]):
+    write_header = not os.path.exists(CSV_PATH)
+    with open(CSV_PATH, "a", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=CSV_FIELDS)
+        if write_header:
+            writer.writeheader()
+        for a in alerts:
+            for atype, aval in a["triggers"]:
+                writer.writerow({
+                    "triggered_at": scan_dt,
+                    "scan_date":    scan_date,
+                    "scan_window":  scan_window,
+                    "ticker":       a["ticker"],
+                    "alert_type":   atype,
+                    "value":        aval,
+                    "price":        a["price"],
+                    "change_pct":   a["change_pct"],
+                    "rvol":         a["rvol"],
+                    "gap_pct":      a["gap_pct"],
+                })
 
 
 # ---------------------------------------------------------------------------
@@ -247,8 +236,6 @@ def main():
     print(f"Pre-market scan  |  {scan_dt}  |  {scan_window}")
     print(f"{'='*60}")
 
-    init_alerts_table()
-
     tickers = load_tickers()
     print(f"Watchlist: {len(tickers)} tickers across {len(WATCHLISTS)} files")
     print(f"Thresholds: RVOL >= {RVOL_THRESHOLD}x  |  change >= {CHANGE_THRESHOLD}%  |  gap >= {GAP_THRESHOLD}%\n")
@@ -273,8 +260,9 @@ def main():
     print(f"\n{len(triggered)} alert(s) triggered out of {len(tickers)} tickers.")
 
     if triggered:
-        save_alerts(scan_dt, scan_date, scan_window, triggered)
-        print(f"Saved {sum(len(a['triggers']) for a in triggered)} alert rows to screener.db")
+        save_alerts_csv(scan_dt, scan_date, scan_window, triggered)
+        n_rows = sum(len(a["triggers"]) for a in triggered)
+        print(f"Appended {n_rows} row(s) to alerts.csv")
         msg = format_message(triggered, scan_window, scan_dt)
         send_telegram(msg)
     else:
