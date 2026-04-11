@@ -421,18 +421,30 @@ def _news_catalyst_score(_row: dict) -> tuple[float, dict]:
 
 
 def _setup_type(ms: float, ee: float, er: float, lq: float,
-                rsi: float, change_5d: float) -> str:
-    """Derive a human label from sub-score geometry."""
+                rsi: float, change_5d: float, change_pct: float = 0.0) -> str:
+    """
+    Derive a human label from sub-score geometry.
+    Order matters — stronger disqualifiers checked first.
+
+    change_pct is today's single-day move. A move >= 15% is treated as
+    extended regardless of what ER scores, because the 1-year cumulative
+    VWAP used in ER can understate intraday extension for recently beaten-
+    down stocks.
+    """
     if lq <= 3:
         return "Low quality / illiquid"
     if er >= 15:
         return "Overextended"
-    if ms >= 17 and ee >= 15 and er <= 9:
-        return "Early breakout"
-    if ms >= 13 and ee >= 11 and er <= 13:
-        return "Emerging momentum"
-    if ms >= 13 and er >= 10:
+    # Hard gate: large single-day move = extended by definition
+    if change_pct >= 15.0 and ms >= 10:
         return "Strong but extended"
+    # Normal ER gate — checked before Emerging momentum
+    if ms >= 13 and er >= 8:
+        return "Strong but extended"
+    if ms >= 17 and ee >= 15 and er <= 7:
+        return "Early breakout"
+    if ms >= 13 and ee >= 11 and er <= 9:
+        return "Emerging momentum"
     if (ms + ee - er) >= 20:
         return "Emerging momentum"
     if (ms + ee - er) >= 10:
@@ -501,8 +513,9 @@ def compute_tradescore(
     if close is not None and len(close) >= 6:
         change_5d = round((float(close.iloc[-1]) / float(close.iloc[-6]) - 1) * 100, 2)
 
+    change_pct = float(row.get("change_pct", 0))
     setup     = _setup_type(ms_val, ee_val, er_val, lq_val,
-                            float(row.get("rsi", 50)), change_5d)
+                            float(row.get("rsi", 50)), change_5d, change_pct)
     rationale = _build_rationale(row, ms_val, ee_val, er_val, setup, change_5d)
 
     return {
@@ -561,7 +574,13 @@ def atr(data: pd.DataFrame, period: int = 14) -> float:
 # Screening
 # ---------------------------------------------------------------------------
 
+_STABLECOINS = {"USDC-USD", "DAI-USD", "USDT-USD", "BUSD-USD", "TUSD-USD", "USDP-USD"}
+
+
 def screen_ticker(ticker: str, strategy: str) -> dict | None:
+    if ticker in _STABLECOINS:
+        return None  # stablecoins have no trading edge — exclude from ranking
+
     tk   = yf.Ticker(ticker)
     data = tk.history(period="1y", interval="1d")
     if len(data) < 20:

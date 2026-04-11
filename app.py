@@ -5,6 +5,7 @@ import sqlite3
 from datetime import date, datetime
 
 from core.sec_edgar import get_recent_filings
+from core.setups import compute_trade_setup
 
 import numpy as np
 import pandas as pd
@@ -310,14 +311,32 @@ def show_opportunity_detail(row: dict):
     st.divider()
 
     with st.expander("Trade setup", expanded=True):
-        direction = row.get("direction") or "—"
-        entry     = row.get("entry") or None
-        stop      = row.get("stop_loss") or None
-        target, rr = None, None
-        if entry and stop:
-            risk   = abs(entry - stop)
-            target = entry + 2.0 * risk if direction == "long" else entry - 2.0 * risk
-            rr     = 2.0
+        # Debug: print row keys to terminal so we can verify what's available
+        print(f"[dialog] {ticker} row keys: {sorted(row.keys())}")
+        print(f"[dialog] {ticker} price={row.get('price')} vwap={row.get('vwap')} "
+              f"ema9={row.get('ema9')} ema20={row.get('ema20')} atr={row.get('atr')}")
+
+        # compute_trade_setup uses price/vwap/ema9/ema20/atr/day_high/day_low
+        # day_high/day_low aren't stored in DB — use price as fallback so setup
+        # still produces a direction; entry will be slightly off but close enough
+        setup_row = dict(row)
+        setup_row.setdefault("day_high", row.get("price", 0))
+        setup_row.setdefault("day_low",  row.get("price", 0))
+        setup_row.setdefault("conviction", _conviction)
+
+        try:
+            setup = compute_trade_setup(setup_row)
+            direction = setup.direction
+            entry     = setup.entry     if setup.direction != "neutral" else None
+            stop      = setup.stop      if setup.direction != "neutral" else row.get("stop_loss")
+            target    = setup.target    if setup.direction != "neutral" else None
+            rr        = setup.rr        if setup.direction != "neutral" else None
+            rat       = setup.rationale
+        except Exception as e:
+            print(f"[dialog] compute_trade_setup error: {e}")
+            direction, entry, stop, target, rr = "—", None, row.get("stop_loss"), None, None
+            rat = ""
+
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("Direction",
                   "🟢 Long" if direction == "long" else
@@ -326,8 +345,7 @@ def show_opportunity_detail(row: dict):
         c3.metric("Stop",   f"${stop:.2f}"   if stop   else "—")
         c4.metric("Target", f"${target:.2f}" if target else "—")
         if rr:
-            st.caption(f"Risk/Reward: {rr:.1f}:1  ·  "
-                      f"Rationale: {row.get('rationale', 'ATR-scaled stop')}")
+            st.caption(f"Risk/Reward: {rr:.1f}:1  ·  {rat}")
 
     st.divider()
 
