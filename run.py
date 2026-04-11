@@ -71,6 +71,9 @@ def init_db():
             float_shares     REAL,
             tradescore       REAL,
             explain          TEXT,
+            setup_type       TEXT,
+            rationale        TEXT,
+            change_5d        REAL,
             PRIMARY KEY (run_date, ticker)
         )
     """)
@@ -80,6 +83,9 @@ def init_db():
         ("float_shares","REAL"),
         ("tradescore",  "REAL"),
         ("explain",     "TEXT"),
+        ("setup_type",  "TEXT"),
+        ("rationale",   "TEXT"),
+        ("change_5d",   "REAL"),
     ]:
         try:
             conn.execute(f"ALTER TABLE results ADD COLUMN {col} {col_type}")
@@ -95,7 +101,7 @@ def save_results(run_date: str, rows: list[dict]):
         conn.execute(
             """
             INSERT OR REPLACE INTO results VALUES
-            (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """,
             (
                 run_date, r["ticker"], r["strategy"], r["asset"],
@@ -106,6 +112,7 @@ def save_results(run_date: str, rows: list[dict]):
                 r["volume_trend_up"], r["score"],
                 r.get("market_cap"), r.get("float_shares"),
                 r.get("tradescore"), r.get("explain"),
+                r.get("setup_type"), r.get("rationale"), r.get("change_5d"),
             ),
         )
     conn.commit()
@@ -166,119 +173,366 @@ def build_ticker_map() -> dict[str, str]:
 
 
 # ---------------------------------------------------------------------------
-# TradeScore (0–100)
+# Scoring constants — adjust thresholds here without touching logic
+# ---------------------------------------------------------------------------
+
+# MomentumScore (max 25)
+MS_RVOL_IDEAL   = 3.0   # RVOL at which full RVOL points are earned
+MS_RVOL_MAX_PTS = 10    # sub-cap for RVOL contribution
+MS_CHG_HI_PCT   = 8.0   # % change earning full change points (sweet spot ceiling)
+MS_CHG_MAX_PTS  = 8     # sub-cap for change% contribution
+MS_MACD_MAX_PTS = 7     # sub-cap for MACD contribution
+
+# EarlyEntryScore (max 25)
+EE_RSI_LO       = 52    # ideal RSI band lower bound
+EE_RSI_HI       = 68    # ideal RSI band upper bound (above here = heating up)
+EE_RSI_MAX_PTS  = 10    # sub-cap for RSI contribution
+EE_EMA_NEAR_PCT = 5.0   # within this % of EMA20 → full proximity points
+EE_EMA_FAR_PCT  = 18.0  # beyond this % from EMA20 → 0 proximity points
+EE_EMA_MAX_PTS  = 8     # sub-cap for EMA proximity
+EE_BOB_MAX_PTS  = 7     # sub-cap for breakout-from-base contribution
+
+# ExtensionRiskScore (max 20, subtracted from total)
+ER_RSI_WARN     = 70    # RSI above this starts penalty
+ER_RSI_HARD     = 82    # RSI at this = max RSI penalty
+ER_RSI_MAX_PTS  = 6     # max RSI penalty points
+ER_DAY_WARN     = 10.0  # single-day % move starts penalty
+ER_DAY_HARD     = 22.0  # single-day % move = max penalty
+ER_DAY_MAX_PTS  = 6     # max daily-overextension penalty points
+ER_VWAP_WARN    = 1.5   # ATR multiples above VWAP starts penalty
+ER_VWAP_HARD    = 4.0   # ATR multiples = max VWAP penalty
+ER_VWAP_MAX_PTS = 5     # max VWAP extension penalty points
+ER_5D_WARN      = 15.0  # 5-session % run starts multi-day penalty
+ER_5D_HARD      = 45.0  # 5-session % run = max multi-day penalty
+ER_5D_MAX_PTS   = 3     # max multi-day-run penalty points
+
+# LiquidityQualityScore (max 15)
+LQ_DVOL_MIN     = 500_000    # dollar volume below this → 0 liquidity points
+LQ_DVOL_FULL    = 15_000_000 # dollar volume above this → full points
+LQ_DVOL_MAX_PTS = 8          # max dollar-volume points
+LQ_QUAL_MAX_PTS = 4          # max float/mcap quality points
+LQ_CONS_MAX_PTS = 3          # max volume-consistency points
+
+
+# ---------------------------------------------------------------------------
+# Scoring utilities
 # ---------------------------------------------------------------------------
 
 def _clamp(v: float, lo: float = 0.0, hi: float = 1.0) -> float:
     return max(lo, min(hi, v))
 
 
-def compute_tradescore(row: dict) -> dict:
+def _lerp(val: float, lo: float, hi: float) -> float:
+    """Linear 0→1 as val goes from lo to hi, clamped."""
+    if hi <= lo:
+        return 1.0 if val >= hi else 0.0
+    return _clamp((val - lo) / (hi - lo))
+
+
+# ---------------------------------------------------------------------------
+# Sub-score functions
+# ---------------------------------------------------------------------------
+
+def _momentum_score(row: dict) -> tuple[float, dict]:
     """
-    Returns {"score": float, "components": dict, "conviction": str}.
-
-    Weights
-    -------
-    RVOL          0.25  — volume confirmation
-    Change %      0.15  — price momentum
-    MACD          0.20  — trend direction and strength
-    EMA trend     0.20  — alignment across timeframes
-    RSI position  0.20  — momentum zone, not exhausted
-
-    Penalty: price extended > 1.8× ATR from VWAP reduces final score.
+    MomentumScore 0–25.
+    RVOL (10) + Change% (8) + MACD (7).
+    RVOL sub-linear above ideal — extreme RVOL can signal panic/chase, not edge.
+    Change% decays above sweet spot so a 15% gap day isn't rewarded more than 8%.
     """
     rvol       = float(row.get("rvol", 0))
     change_pct = float(row.get("change_pct", 0))
     macd       = float(row.get("macd", 0))
     macd_sig   = float(row.get("macd_signal", 0))
-    ema9       = float(row.get("ema9", 0))
-    ema20      = float(row.get("ema20", 0))
-    ema200     = float(row.get("ema200", 0))
-    rsi_val    = float(row.get("rsi", 50))
     atr_val    = float(row.get("atr", 0.01)) or 0.01
-    price      = float(row.get("price", 0))
-    vwap       = float(row.get("vwap", price)) or price
-    is_crypto  = str(row.get("ticker", "")).endswith("-USD")
 
-    # --- RVOL component ---
-    # 1× = normal, 5×+ = max. Scaled so 3× ≈ 0.70.
-    rvol_c = _clamp(rvol / 5.0)
-
-    # --- Change % component ---
-    # 0% = 0, 10%+ = 1.0. Negative change scores 0.
-    change_c = _clamp(max(change_pct, 0) / 10.0)
-
-    # --- MACD component ---
-    # Normalise MACD diff relative to ATR so large-cap vs small-cap is comparable.
-    macd_diff = macd - macd_sig
-    macd_norm = macd_diff / atr_val
-    # Maps: +0.05 → 1.0, 0 → 0.5, -0.05 → 0.0
-    macd_c = _clamp((macd_norm + 0.05) / 0.10)
-
-    # --- EMA trend component ---
-    if is_crypto:
-        ema_c = 1.0 if ema9 > ema20 else 0.0
+    # RVOL: ramps up to ideal, then slowly diminishes for extremes
+    if rvol <= 0:
+        rvol_pts = 0.0
+    elif rvol <= MS_RVOL_IDEAL:
+        rvol_pts = MS_RVOL_MAX_PTS * (rvol / MS_RVOL_IDEAL) ** 0.6
     else:
-        if ema9 > ema20 > ema200:
-            ema_c = 1.0
-        elif ema9 > ema20:
-            ema_c = 0.5
-        else:
-            ema_c = 0.0
+        excess   = _clamp((rvol - MS_RVOL_IDEAL) / MS_RVOL_IDEAL)
+        rvol_pts = MS_RVOL_MAX_PTS * (1.0 - 0.2 * excess)
+    rvol_pts = _clamp(rvol_pts, 0, MS_RVOL_MAX_PTS)
 
-    # --- RSI position component ---
-    # Peak at 55 (momentum zone). Penalises overbought/oversold extremes.
-    if 45 <= rsi_val <= 65:
-        rsi_c = 1.0
-    elif 35 <= rsi_val <= 75:
-        rsi_c = 0.7
-    elif 30 <= rsi_val <= 80:
-        rsi_c = 0.4
+    # Change%: full at sweet spot ceiling, decays above it
+    if change_pct <= 0:
+        chg_pts = 0.0
+    elif change_pct <= MS_CHG_HI_PCT:
+        chg_pts = MS_CHG_MAX_PTS * (change_pct / MS_CHG_HI_PCT)
     else:
-        rsi_c = 0.1
+        chg_pts = MS_CHG_MAX_PTS * max(0.4, 1.0 - (change_pct - MS_CHG_HI_PCT) / 25.0)
+    chg_pts = _clamp(chg_pts, 0, MS_CHG_MAX_PTS)
 
-    # --- Raw weighted score ---
-    raw = (
-        rvol_c   * 0.25
-        + change_c * 0.15
-        + macd_c   * 0.20
-        + ema_c    * 0.20
-        + rsi_c    * 0.20
-    )
+    # MACD: normalized to ATR. ±0.10 ATR diff maps to 0–7 pts.
+    macd_norm = (macd - macd_sig) / atr_val
+    macd_pts  = _clamp((macd_norm + 0.1) / 0.2) * MS_MACD_MAX_PTS
 
-    # --- Extension penalty ---
-    # Price > 1.8 ATR from VWAP = chasing. Penalise up to 30%.
-    distance_atr = abs(price - vwap) / atr_val if atr_val else 0
-    if distance_atr > 1.8:
-        penalty = _clamp((distance_atr - 1.8) / 2.0, 0.0, 0.30)
-    else:
-        penalty = 0.0
-
-    final_score = round(raw * (1 - penalty) * 100, 1)
-
-    return {
-        "score": final_score,
-        "components": {
-            "rvol":              round(rvol_c, 3),
-            "change_pct":        round(change_c, 3),
-            "momentum_macd":     round(macd_c, 3),
-            "ema_trend":         round(ema_c, 3),
-            "rsi_position":      round(rsi_c, 3),
-            "penalty_extension": round(penalty, 3),
-        },
-        "conviction": conviction_label(final_score),
+    total = rvol_pts + chg_pts + macd_pts
+    return round(total, 2), {
+        "rvol_pts":   round(rvol_pts, 2),
+        "change_pts": round(chg_pts,  2),
+        "macd_pts":   round(macd_pts, 2),
     }
 
 
-def conviction_label(score: float) -> str:
-    if score >= 72:
-        return "High conviction"
-    elif score >= 52:
-        return "Strong setup"
-    elif score >= 35:
-        return "Watchlist"
+def _early_entry_score(row: dict, close: pd.Series | None) -> tuple[float, dict]:
+    """
+    EarlyEntryScore 0–25.
+    RSI zone (10) + EMA20 proximity (8) + breakout-from-base (7).
+    RSI 52–68 is the sweet spot: confirmed momentum, not yet overbought.
+    EMA proximity rewards names that haven't yet run far from their trend.
+    BOB (breakout-from-base) rewards price at or near 20-session highs.
+    """
+    rsi_val = float(row.get("rsi", 50))
+    ema20   = float(row.get("ema20", 0)) or float(row.get("price", 1))
+    price   = float(row.get("price", 1)) or 1.0
+
+    # RSI zone: peak in [EE_RSI_LO, EE_RSI_HI], decays linearly outside
+    if EE_RSI_LO <= rsi_val <= EE_RSI_HI:
+        rsi_pts = float(EE_RSI_MAX_PTS)
+    elif 42 <= rsi_val < EE_RSI_LO:
+        rsi_pts = EE_RSI_MAX_PTS * _lerp(rsi_val, 42, EE_RSI_LO)
+    elif EE_RSI_HI < rsi_val <= 76:
+        rsi_pts = EE_RSI_MAX_PTS * (1.0 - _lerp(rsi_val, EE_RSI_HI, 76))
     else:
-        return "Avoid"
+        rsi_pts = 0.0
+
+    # EMA20 proximity: the closer to the moving average, the cleaner the entry
+    dist_pct = abs(price - ema20) / ema20 * 100 if ema20 > 0 else EE_EMA_FAR_PCT
+    if dist_pct <= EE_EMA_NEAR_PCT:
+        ema_pts = float(EE_EMA_MAX_PTS)
+    elif dist_pct <= EE_EMA_FAR_PCT:
+        ema_pts = EE_EMA_MAX_PTS * (1.0 - _lerp(dist_pct, EE_EMA_NEAR_PCT, EE_EMA_FAR_PCT))
+    else:
+        ema_pts = 0.0
+
+    # Breakout-from-base: is price at or near its 20-session high?
+    bob_pts = 0.0
+    if close is not None and len(close) >= 20:
+        hi_20   = float(close.iloc[-20:].max())
+        pct_hi  = price / hi_20 if hi_20 > 0 else 0.0
+        if pct_hi >= 0.97:      # at or above 20-day high — fresh breakout
+            bob_pts = float(EE_BOB_MAX_PTS)
+        elif pct_hi >= 0.85:
+            bob_pts = EE_BOB_MAX_PTS * _lerp(pct_hi, 0.85, 0.97)
+
+    total = rsi_pts + ema_pts + bob_pts
+    return round(total, 2), {
+        "rsi_pts": round(rsi_pts, 2),
+        "ema_pts": round(ema_pts, 2),
+        "bob_pts": round(bob_pts, 2),
+    }
+
+
+def _extension_risk_score(row: dict, close: pd.Series | None) -> tuple[float, dict]:
+    """
+    ExtensionRiskScore 0–20 (subtracted). Higher = more dangerous entry.
+    RSI overbought (6) + single-day overextension (6) + VWAP distance (5) + 5-day run (3).
+    """
+    rsi_val    = float(row.get("rsi", 50))
+    change_pct = float(row.get("change_pct", 0))
+    price      = float(row.get("price", 1))
+    vwap       = float(row.get("vwap", price)) or price
+    atr_val    = float(row.get("atr", 0.01)) or 0.01
+
+    # RSI overbought penalty
+    rsi_pen = ER_RSI_MAX_PTS * _lerp(rsi_val, ER_RSI_WARN, ER_RSI_HARD)
+
+    # Single-day overextension penalty (absolute move)
+    day_pen = ER_DAY_MAX_PTS * _lerp(abs(change_pct), ER_DAY_WARN, ER_DAY_HARD)
+
+    # VWAP distance penalty in ATR multiples
+    vwap_dist = abs(price - vwap) / atr_val
+    vwap_pen  = ER_VWAP_MAX_PTS * _lerp(vwap_dist, ER_VWAP_WARN, ER_VWAP_HARD)
+
+    # 5-session cumulative run penalty
+    run5_pen  = 0.0
+    if close is not None and len(close) >= 6:
+        change_5d = (float(close.iloc[-1]) / float(close.iloc[-6]) - 1) * 100
+        run5_pen  = ER_5D_MAX_PTS * _lerp(abs(change_5d), ER_5D_WARN, ER_5D_HARD)
+
+    total = rsi_pen + day_pen + vwap_pen + run5_pen
+    return round(_clamp(total, 0, 20), 2), {
+        "rsi_pen":  round(rsi_pen,  2),
+        "day_pen":  round(day_pen,  2),
+        "vwap_pen": round(vwap_pen, 2),
+        "run5_pen": round(run5_pen, 2),
+    }
+
+
+def _liquidity_score(row: dict, data: pd.DataFrame | None) -> tuple[float, dict]:
+    """
+    LiquidityQualityScore 0–15.
+    Dollar volume (8) + float/mcap quality tier (4) + volume consistency (3).
+    Mid-cap scores highest on quality — cleaner trends, less manipulation risk.
+    """
+    price      = float(row.get("price", 0))
+    market_cap = row.get("market_cap")
+
+    # Dollar volume
+    dvol = 0.0
+    if data is not None and len(data) > 0:
+        dvol = price * float(data["Volume"].iloc[-1])
+    if dvol >= LQ_DVOL_FULL:
+        dvol_pts = float(LQ_DVOL_MAX_PTS)
+    elif dvol >= LQ_DVOL_MIN:
+        dvol_pts = LQ_DVOL_MAX_PTS * _lerp(dvol, LQ_DVOL_MIN, LQ_DVOL_FULL)
+    else:
+        dvol_pts = 0.0
+
+    # Float/mcap quality tier
+    float_shares = row.get("float_shares")
+    if market_cap:
+        if market_cap >= 10_000_000_000:    # large cap — valid but not the focus
+            qual_pts = 2.0
+        elif market_cap >= 2_000_000_000:   # mid cap — cleanest for trend trades
+            qual_pts = float(LQ_QUAL_MAX_PTS)
+        elif market_cap >= 500_000_000:     # small cap — higher risk, bigger moves
+            qual_pts = 3.0
+        else:                               # micro cap — added risk, thin market
+            qual_pts = 1.0
+        if float_shares and float_shares < 10_000_000:   # very low float = spike risk
+            qual_pts = max(0.0, qual_pts - 2.0)
+    else:
+        qual_pts = 2.0  # unknown = neutral
+
+    # Volume consistency: low coefficient of variation = consistent participation
+    cons_pts = 0.0
+    if data is not None and len(data) >= 11:
+        vols = data["Volume"].iloc[-11:-1]
+        mean = vols.mean()
+        if mean > 0:
+            cv       = vols.std() / mean
+            cons_pts = LQ_CONS_MAX_PTS * max(0.0, 1.0 - float(cv))
+
+    total = dvol_pts + qual_pts + cons_pts
+    return round(_clamp(total, 0, 15), 2), {
+        "dvol_pts": round(dvol_pts, 2),
+        "qual_pts": round(qual_pts, 2),
+        "cons_pts": round(cons_pts, 2),
+    }
+
+
+def _news_catalyst_score(_row: dict) -> tuple[float, dict]:
+    """NewsCatalystScore 0–15. Stubbed pending news integration."""
+    return 0.0, {"note": "stub — no news source connected"}
+
+
+def _setup_type(ms: float, ee: float, er: float, lq: float,
+                rsi: float, change_5d: float) -> str:
+    """Derive a human label from sub-score geometry."""
+    if lq <= 3:
+        return "Low quality / illiquid"
+    if er >= 15:
+        return "Overextended"
+    if ms >= 17 and ee >= 15 and er <= 9:
+        return "Early breakout"
+    if ms >= 13 and ee >= 11 and er <= 13:
+        return "Emerging momentum"
+    if ms >= 13 and er >= 10:
+        return "Strong but extended"
+    if (ms + ee - er) >= 20:
+        return "Emerging momentum"
+    if (ms + ee - er) >= 10:
+        return "Momentum watchlist"
+    return "Avoid"
+
+
+def _build_rationale(row: dict, ms: float, ee: float, er: float,
+                     setup_type: str, change_5d: float) -> str:
+    """One-line explanation for why this ticker ranked where it did."""
+    price   = float(row.get("price", 0))
+    rvol    = float(row.get("rvol", 0))
+    rsi_val = float(row.get("rsi", 50))
+    chg     = float(row.get("change_pct", 0))
+    ema20   = float(row.get("ema20", 0)) or price
+    dist    = (price - ema20) / ema20 * 100 if ema20 > 0 else 0.0
+
+    parts = []
+    if setup_type == "Early breakout":
+        parts.append(f"Breaking out on {rvol:.1f}x RVOL")
+    elif setup_type == "Emerging momentum":
+        parts.append(f"Building momentum, {rvol:.1f}x RVOL")
+    elif setup_type == "Strong but extended":
+        parts.append(f"Strong move but stretched")
+    elif setup_type == "Overextended":
+        parts.append(f"Likely too late — {change_5d:+.0f}% 5-day run")
+    elif setup_type == "Momentum watchlist":
+        parts.append(f"Needs confirmation")
+    elif setup_type == "Low quality / illiquid":
+        parts.append(f"Thin liquidity, elevated risk")
+
+    parts.append(f"RSI {rsi_val:.0f}")
+    if abs(dist) > 8:
+        parts.append(f"{dist:+.0f}% from EMA20")
+    if er >= 10:
+        parts.append("elevated chase risk")
+
+    return ", ".join(parts)
+
+
+# ---------------------------------------------------------------------------
+# TradeScore — composite
+# ---------------------------------------------------------------------------
+
+def compute_tradescore(
+    row: dict,
+    close: pd.Series | None = None,
+    data: pd.DataFrame | None = None,
+) -> dict:
+    """
+    FinalTradeScore = MomentumScore + EarlyEntryScore + LiquidityScore
+                      + NewsCatalystScore - ExtensionRiskScore
+
+    Practical range 0–65. Negative values clipped to 0.
+    Sub-scores are also returned for display and tuning.
+    """
+    ms_val,  ms_det  = _momentum_score(row)
+    ee_val,  ee_det  = _early_entry_score(row, close)
+    er_val,  er_det  = _extension_risk_score(row, close)
+    lq_val,  lq_det  = _liquidity_score(row, data)
+    nc_val,  nc_det  = _news_catalyst_score(row)
+
+    final = round(max(0.0, ms_val + ee_val + lq_val + nc_val - er_val), 1)
+
+    change_5d = 0.0
+    if close is not None and len(close) >= 6:
+        change_5d = round((float(close.iloc[-1]) / float(close.iloc[-6]) - 1) * 100, 2)
+
+    setup     = _setup_type(ms_val, ee_val, er_val, lq_val,
+                            float(row.get("rsi", 50)), change_5d)
+    rationale = _build_rationale(row, ms_val, ee_val, er_val, setup, change_5d)
+
+    return {
+        "score":           final,
+        "momentum_score":  ms_val,
+        "early_entry":     ee_val,
+        "extension_risk":  er_val,
+        "liquidity":       lq_val,
+        "news_catalyst":   nc_val,
+        "setup_type":      setup,
+        "rationale":       rationale,
+        "change_5d":       change_5d,
+        "conviction":      setup,          # conviction = setup_type label
+        "components": {
+            "momentum":    ms_det,
+            "early_entry": ee_det,
+            "extension":   er_det,
+            "liquidity":   lq_det,
+        },
+    }
+
+
+def conviction_label(score: float, setup_type: str = "") -> str:
+    """Kept for backwards compat — returns the setup_type label directly."""
+    return setup_type if setup_type else (
+        "Early breakout"    if score >= 52 else
+        "Emerging momentum" if score >= 35 else
+        "Momentum watchlist" if score >= 20 else
+        "Avoid"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -324,8 +578,14 @@ def screen_ticker(ticker: str, strategy: str) -> dict | None:
     rsi_val = rsi(close)
     atr_val = atr(data)
 
+    # Market cap via fast_info (fast, ~50 ms) for all tickers.
+    # Full info (slow) only for momentum strategy where float_shares is needed.
     market_cap   = None
     float_shares = None
+    try:
+        market_cap = getattr(tk.fast_info, "market_cap", None)
+    except Exception:
+        pass
 
     # Finviz top gainers are filtered strictly; curated lists always pass
     if strategy == "general" and not (
@@ -412,8 +672,11 @@ def screen_ticker(ticker: str, strategy: str) -> dict | None:
         "float_shares":    float_shares,
     }
 
-    ts = compute_tradescore(row)
+    ts = compute_tradescore(row, close=close, data=data)
     row["tradescore"] = ts["score"]
+    row["setup_type"] = ts["setup_type"]
+    row["rationale"]  = ts["rationale"]
+    row["change_5d"]  = ts["change_5d"]
     row["explain"]    = json.dumps(ts)
     return row
 
@@ -452,17 +715,23 @@ def main():
         # Top 5 by TradeScore
         top5 = sorted(results, key=lambda r: r["tradescore"], reverse=True)[:5]
         print("\nTop 5 by TradeScore:")
-        print(f"  {'Ticker':<10} {'TradeScore':>10} {'Conviction':<18} {'RVOL':>6} {'Change':>8} {'RSI':>6}")
-        print("  " + "-" * 66)
+        hdr = f"  {'Ticker':<10} {'Score':>6} {'SetupType':<22} {'Mom':>5} {'Entry':>6} {'Ext':>5} {'Liq':>5} {'RVOL':>6} {'Chg':>7} {'RSI':>5}"
+        print(hdr)
+        print("  " + "-" * len(hdr))
         for r in top5:
             ts_data = json.loads(r["explain"])
             print(
-                f"  {r['ticker']:<10} {r['tradescore']:>10.1f} "
-                f"{ts_data['conviction']:<18} "
+                f"  {r['ticker']:<10} {r['tradescore']:>6.1f} "
+                f"{ts_data['setup_type']:<22} "
+                f"{ts_data['momentum_score']:>5.1f} "
+                f"{ts_data['early_entry']:>6.1f} "
+                f"{ts_data['extension_risk']:>5.1f} "
+                f"{ts_data['liquidity']:>5.1f} "
                 f"{r['rvol']:>6.1f}x "
-                f"{r['change_pct']:>+7.1f}% "
-                f"{r['rsi']:>6.1f}"
+                f"{r['change_pct']:>+6.1f}% "
+                f"{r['rsi']:>5.1f}"
             )
+            print(f"    → {ts_data['rationale']}")
     else:
         print("\nNo candidates found today.")
 

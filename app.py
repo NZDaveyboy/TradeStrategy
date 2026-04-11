@@ -247,9 +247,16 @@ def show_opportunity_detail(row: dict):
         st.subheader(ticker)
         st.caption(row.get("strategy", ""))
     with col2:
-        st.metric("TradeScore", f"{row.get('tradescore', 0) or 0:.0f}/100")
+        st.metric("TradeScore", f"{row.get('tradescore', 0) or 0:.0f}")
     with col3:
-        st.metric("Conviction", row.get("conviction") or "—")
+        # conviction is now the setup_type label
+        raw_ex = row.get("explain") or "{}"
+        try:
+            _ex = json.loads(raw_ex) if isinstance(raw_ex, str) else raw_ex
+        except Exception:
+            _ex = {}
+        _conviction = _ex.get("conviction") or _ex.get("setup_type") or row.get("conviction") or "—"
+        st.metric("Setup", _conviction)
 
     st.divider()
 
@@ -259,25 +266,46 @@ def show_opportunity_detail(row: dict):
             explain = json.loads(raw_explain) if isinstance(raw_explain, str) else raw_explain
         except Exception:
             explain = {}
-        components = explain.get("components", {})
-        if components:
-            positives = {k: v for k, v in components.items()
-                        if not k.startswith("penalty") and v > 0}
-            penalties = {k: v for k, v in components.items()
-                        if k.startswith("penalty") and v > 0}
-            if positives:
-                st.caption("**Signal contributions**")
-                for k, v in positives.items():
-                    st.progress(min(float(v), 1.0),
-                                text=f"{k.replace('_', ' ').title()}: {v:.2f}")
-            if penalties:
-                st.caption("**Penalties**")
-                for k, v in penalties.items():
-                    label = k.replace("penalty_", "").replace("_", " ").title()
-                    st.progress(min(float(v), 1.0),
-                                text=f"⚠️ {label}: -{v:.2f}")
+
+        # New scorer exposes named sub-scores at top level
+        ms  = explain.get("momentum_score")
+        ee  = explain.get("early_entry")
+        er  = explain.get("extension_risk")
+        lq  = explain.get("liquidity")
+        rat = explain.get("rationale") or row.get("rationale")
+
+        if ms is not None:
+            st.caption("**Sub-scores  (MomentumScore + EarlyEntry + Liquidity − ExtensionRisk)**")
+            # Max values: MS=25, EE=25, LQ=15, ER=20
+            _sub_rows = [
+                ("Momentum",       ms,  25, False),
+                ("Early Entry",    ee,  25, False),
+                ("Liquidity",      lq,  15, False),
+                ("Extension Risk", er,  20, True),   # penalty — higher is worse
+            ]
+            for label, val, cap, is_penalty in _sub_rows:
+                if val is None:
+                    continue
+                pct = min(float(val) / cap, 1.0)
+                prefix = "⚠️ " if is_penalty else ""
+                suffix = " (penalty)" if is_penalty else ""
+                st.progress(pct, text=f"{prefix}{label}{suffix}: {val:.1f} / {cap}")
+            if rat:
+                st.caption(f"**Rationale:** {rat}")
         else:
-            st.info("Run the screener to generate score breakdown.")
+            # Fallback: old flat component format (pre-rewrite rows)
+            components = explain.get("components", {})
+            if components and all(isinstance(v, (int, float)) for v in components.values()):
+                st.caption("**Signal contributions**")
+                for k, v in components.items():
+                    if k.startswith("penalty"):
+                        label = k.replace("penalty_", "").replace("_", " ").title()
+                        st.progress(min(float(v), 1.0), text=f"⚠️ {label}: -{v:.2f}")
+                    elif v > 0:
+                        st.progress(min(float(v), 1.0),
+                                    text=f"{k.replace('_', ' ').title()}: {v:.2f}")
+            else:
+                st.info("Run the screener to generate score breakdown.")
 
     st.divider()
 
