@@ -22,6 +22,19 @@ import os
 import time
 from datetime import datetime, timezone
 
+# Load .env from project directory (no extra packages needed)
+def _load_env():
+    env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+    if os.path.exists(env_path):
+        with open(env_path) as _f:
+            for _line in _f:
+                _line = _line.strip()
+                if _line and not _line.startswith("#") and "=" in _line:
+                    _k, _v = _line.split("=", 1)
+                    os.environ.setdefault(_k.strip(), _v.strip())
+_load_env()
+
+
 import requests
 import yfinance as yf
 
@@ -124,6 +137,8 @@ def scan_ticker(ticker: str) -> dict | None:
         except Exception:
             today_open = float(hist["Open"].iloc[-1])
 
+        if prev_close <= 0:
+            return None
         change_pct = (current_price - prev_close) / prev_close * 100
         gap_pct    = (today_open - prev_close) / prev_close * 100
 

@@ -164,7 +164,8 @@ def rsi(close: pd.Series, period: int = 14) -> float:
     gain = delta.clip(lower=0).rolling(period).mean()
     loss = (-delta.clip(upper=0)).rolling(period).mean()
     rs = gain / loss.replace(0, float("nan"))
-    return float((100 - 100 / (1 + rs)).iloc[-1])
+    val = float((100 - 100 / (1 + rs)).iloc[-1])
+    return val if not (val != val) else 50.0  # NaN guard — return neutral 50
 
 
 def atr(data: pd.DataFrame, period: int = 14) -> float:
@@ -172,7 +173,8 @@ def atr(data: pd.DataFrame, period: int = 14) -> float:
     tr = pd.concat(
         [h - l, (h - c.shift()).abs(), (l - c.shift()).abs()], axis=1
     ).max(axis=1)
-    return float(tr.rolling(period).mean().iloc[-1])
+    val = float(tr.rolling(period).mean().iloc[-1])
+    return val if not (val != val) else 0.01  # NaN guard — return near-zero
 
 
 # ---------------------------------------------------------------------------
@@ -225,38 +227,59 @@ def screen_ticker(ticker: str, strategy: str) -> dict | None:
     exp2   = close.ewm(span=26, adjust=False).mean()
     macd   = float((exp1 - exp2).iloc[-1])
     macd_s = float((exp1 - exp2).ewm(span=9, adjust=False).mean().iloc[-1])
-    vwap   = float(((data["High"] + data["Low"] + data["Close"]) / 3).iloc[-1])
+    typical_price = (data["High"] + data["Low"] + data["Close"]) / 3
+    vwap = float(
+        (typical_price * data["Volume"]).cumsum().iloc[-1]
+        / data["Volume"].cumsum().iloc[-1]
+    ) if data["Volume"].sum() > 0 else float(typical_price.iloc[-1])
 
     is_crypto = ticker.endswith("-USD")
-    if not is_crypto and len(data) >= 7:
-        vol3 = data["Volume"].rolling(3).mean()
-        volume_trend_up = int(float(vol3.iloc[-1]) > float(vol3.iloc[-4]))
-    else:
-        volume_trend_up = 0
 
-    score = sum([
-        macd > macd_s,
-        ema9 > ema20 > ema200,
-        price > vwap,
-        volume_trend_up == 1,
-    ])
+    if is_crypto:
+        # Crypto scoring — equity signals don't apply (no market hours, EMA200
+        # is useless in multi-month bear cycles, volume has no daily reset).
+        #
+        # Score 0-4:
+        #   1. MACD above signal line          — momentum direction
+        #   2. EMA9 > EMA20                    — short-term trend (drop EMA200)
+        #   3. RVOL >= 1.5x                    — above-average participation
+        #   4. RSI 40–75                       — momentum zone, not exhausted
+        volume_trend_up = 0
+        rsi_in_zone     = 40 <= rsi_val <= 75
+        score = sum([
+            macd > macd_s,
+            ema9 > ema20,
+            rvol >= 1.5,
+            rsi_in_zone,
+        ])
+        stop_loss = round(price - 2.0 * atr_val, 4)   # wider stop for crypto volatility
+    else:
+        vol3 = data["Volume"].rolling(3).mean()
+        volume_trend_up = int(len(data) >= 7 and float(vol3.iloc[-1]) > float(vol3.iloc[-4]))
+        score = sum([
+            macd > macd_s,
+            ema9 > ema20 > ema200,
+            price > vwap,
+            volume_trend_up == 1,
+        ])
+        stop_loss = round(price - 1.5 * atr_val, 2)
 
     return {
         "ticker":          ticker,
         "strategy":        strategy,
         "asset":           "crypto" if is_crypto else "equity",
-        "price":           round(price, 2),
+        "price":           round(price, 4 if is_crypto else 2),
         "change_pct":      round(change, 2),
         "rvol":            round(rvol, 2),
-        "ema9":            round(ema9, 2),
-        "ema20":           round(ema20, 2),
-        "ema200":          round(ema200, 2),
+        "ema9":            round(ema9, 4 if is_crypto else 2),
+        "ema20":           round(ema20, 4 if is_crypto else 2),
+        "ema200":          round(ema200, 4 if is_crypto else 2),
         "rsi":             round(rsi_val, 2),
         "atr":             round(atr_val, 4),
-        "stop_loss":       round(price - 1.5 * atr_val, 2),
+        "stop_loss":       stop_loss,
         "macd":            round(macd, 4),
         "macd_signal":     round(macd_s, 4),
-        "vwap":            round(vwap, 2),
+        "vwap":            round(vwap, 4 if is_crypto else 2),
         "volume_trend_up": volume_trend_up,
         "score":           score,
         "market_cap":      market_cap,

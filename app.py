@@ -1,7 +1,9 @@
+import math
 import os
 import sqlite3
-from datetime import date
+from datetime import date, datetime
 
+import numpy as np
 import pandas as pd
 import streamlit as st
 import yfinance as yf
@@ -148,18 +150,85 @@ with st.sidebar:
             )
 
         asset_filter = st.selectbox("Asset type", ["All", "equity", "crypto"])
-        min_score = st.slider("Min score (0–4)", 0, 4, 0)
+        min_score = st.slider(
+            "Min score (0–4)", 0, 4, 0,
+            help=(
+                "Each stock is scored 0–4 based on four signals:\n"
+                "- MACD above its signal line\n"
+                "- Price above all three EMAs (9 / 20 / 200)\n"
+                "- Price above VWAP\n"
+                "- Rising 3-day volume trend\n\n"
+                "Set to 3 or 4 to see only the strongest setups."
+            ),
+        )
         default_change = 5 if strategy == "momentum" else 0
         default_rvol   = 2.0 if strategy == "momentum" else 0.0
-        min_change = st.slider("Min change %", 0, 100, default_change)
-        min_rvol   = st.slider("Min RVOL", 0.0, 20.0, default_rvol, 0.5)
+        min_change = st.slider(
+            "Min change %", 0, 100, default_change,
+            help=(
+                "Minimum percentage price change on the day compared to the previous close.\n\n"
+                "Higher values surface stocks with stronger intraday momentum. "
+                "Momentum strategy defaults to 5%."
+            ),
+        )
+        min_rvol = st.slider(
+            "Min RVOL", 0.0, 20.0, default_rvol, 0.5,
+            help=(
+                "Relative Volume — today's volume divided by the stock's average daily volume.\n\n"
+                "2× means twice the usual volume. High RVOL signals unusual activity "
+                "and potential breakout conditions. Momentum strategy defaults to 2×."
+            ),
+        )
+
+    st.divider()
+    with st.expander("How to use"):
+        st.markdown(
+            """
+**Getting started**
+
+1. Run the screener from your terminal to populate data:
+   ```
+   cd ~/TradeStrategy
+   python3 run.py
+   ```
+2. Come back here and select the date from the **Date** dropdown.
+
+**Tabs**
+
+- **Screener** — ranked list of candidates from the last scan. Use the filters above to narrow results. Score 3–4 means all major signals align.
+- **Trade Tracker** — log your open positions (equities and crypto). Live P&L updates every 5 minutes. All values in NZD.
+- **Alerts** — pre-market gap and RVOL spikes captured by `scan_premarket.py`.
+
+**Filters**
+
+| Filter | What it does |
+|---|---|
+| Strategy | Filter by ticker watchlist (AI, Tech, Crypto, Momentum, or Finviz gainers) |
+| Asset type | Equities or crypto |
+| Min score | 0–4 signal strength — higher is more selective |
+| Min change % | Day's price move vs previous close |
+| Min RVOL | Volume relative to average — flags unusual activity |
+
+**Scheduling** — add cron jobs to catch moves early and run the daily scan before the US open:
+```
+# Daily screener — 9am ET (2am NZT)
+0 2 * * 1-5 cd ~/TradeStrategy && python3 run.py
+
+# Intraday — every 15 min during US hours (catches volume spikes early)
+*/15 14-21 * * 1-5 cd ~/TradeStrategy && python3 scan_intraday.py
+
+# Crypto intraday — every 30 min, 24/7
+*/30 * * * * cd ~/TradeStrategy && python3 scan_intraday.py --crypto-only
+```
+            """
+        )
 
 
 # ---------------------------------------------------------------------------
 # Tabs
 # ---------------------------------------------------------------------------
 
-tab_screener, tab_tracker, tab_alerts = st.tabs(["Screener", "Trade Tracker", "Alerts"])
+tab_screener, tab_tracker, tab_alerts, tab_backtest, tab_advice, tab_options, tab_learn = st.tabs(["Screener", "Trade Tracker", "Alerts", "Backtest", "Advice", "Options", "Learn"])
 
 
 # ===========================================================================
@@ -331,7 +400,8 @@ with tab_tracker:
         if current_usd and nzdusd:
             current_nzd  = amount * current_usd / nzdusd
             pl_nzd       = current_nzd - cost_nzd
-            pl_pct       = (current_usd / nzdusd - avg_buy_nzd) / avg_buy_nzd * 100
+            current_nzd_per_unit = current_usd / nzdusd
+            pl_pct       = (current_nzd_per_unit - avg_buy_nzd) / avg_buy_nzd * 100 if avg_buy_nzd else 0
             today_pl_nzd = amount * (current_usd - prev_usd) / nzdusd if prev_usd else 0.0
         else:
             current_nzd = cost_nzd
@@ -545,7 +615,8 @@ with tab_tracker:
 with tab_alerts:
 
     ALERT_LABELS = {
-        "rvol":     "RVOL",
+        "rvol":     "RVOL (daily)",
+        "rvol_15m": "RVOL 15m",
         "change":   "Change",
         "gap_up":   "Gap Up",
         "gap_down": "Gap Down",
@@ -577,7 +648,7 @@ with tab_alerts:
             f1, f2, f3 = st.columns(3)
             date_filter   = f1.selectbox("Date",   ["All"] + sorted(all_alerts["scan_date"].unique().tolist(), reverse=True))
             ticker_filter = f2.selectbox("Ticker", ["All"] + sorted(all_alerts["ticker"].unique().tolist()))
-            type_filter   = f3.selectbox("Alert type", ["All", "rvol", "change", "gap_up", "gap_down"])
+            type_filter   = f3.selectbox("Alert type", ["All", "rvol", "rvol_15m", "change", "gap_up", "gap_down"])
 
             filtered = all_alerts.copy()
             if date_filter   != "All":
@@ -641,3 +712,1369 @@ with tab_alerts:
                     .reset_index()
                 )
                 st.dataframe(freq, use_container_width=True, hide_index=True)
+
+
+# ===========================================================================
+# TAB 4 — Backtest
+# ===========================================================================
+
+with tab_backtest:
+
+    conn = get_conn()
+    bt_exists = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='backtest'"
+    ).fetchone()
+    bt_df = pd.read_sql("SELECT * FROM backtest", conn) if bt_exists else pd.DataFrame()
+    conn.close()
+
+    if bt_df.empty:
+        st.info("No backtest data yet. Run `python3 backtest.py` to populate.")
+    else:
+        bt_df = bt_df.dropna(subset=["return_1d"])   # only rows with forward data
+
+        # -------------------------------------------------------------------
+        # Top metrics
+        # -------------------------------------------------------------------
+
+        total_trades = len(bt_df)
+        overall_win  = (bt_df["return_1d"] > 0).sum()
+        win_rate     = overall_win / total_trades * 100 if total_trades else 0
+        avg_1d       = bt_df["return_1d"].mean()
+        avg_5d       = bt_df["return_5d"].mean() if "return_5d" in bt_df else None
+
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Trades analysed",  total_trades)
+        m2.metric("Win rate (1d)",    f"{win_rate:.1f}%")
+        m3.metric("Avg return (1d)",  f"{avg_1d:+.2f}%")
+        if avg_5d is not None:
+            m4.metric("Avg return (5d)", f"{avg_5d:+.2f}%")
+
+        st.divider()
+
+        # -------------------------------------------------------------------
+        # Return by score
+        # -------------------------------------------------------------------
+
+        st.subheader("Does a higher score predict better returns?")
+
+        score_summary = (
+            bt_df.groupby("score")
+            .agg(
+                trades       =("return_1d", "count"),
+                avg_1d       =("return_1d", "mean"),
+                avg_3d       =("return_3d", "mean"),
+                avg_5d       =("return_5d", "mean"),
+                win_rate_1d  =("return_1d", lambda x: (x > 0).mean() * 100),
+            )
+            .round(2)
+            .reset_index()
+        )
+        score_summary.columns = ["Score", "Trades", "Avg 1d %", "Avg 3d %", "Avg 5d %", "Win rate 1d %"]
+
+        st.dataframe(score_summary, use_container_width=True, hide_index=True)
+
+        chart_data = score_summary.set_index("Score")[["Avg 1d %", "Avg 3d %", "Avg 5d %"]]
+        st.bar_chart(chart_data)
+
+        st.divider()
+
+        # -------------------------------------------------------------------
+        # Return by strategy
+        # -------------------------------------------------------------------
+
+        st.subheader("Return by strategy")
+
+        strat_summary = (
+            bt_df.groupby("strategy")
+            .agg(
+                trades      =("return_1d", "count"),
+                avg_1d      =("return_1d", "mean"),
+                avg_5d      =("return_5d", "mean"),
+                best_1d     =("return_1d", "max"),
+                worst_1d    =("return_1d", "min"),
+                win_rate    =("return_1d", lambda x: (x > 0).mean() * 100),
+            )
+            .round(2)
+            .reset_index()
+        )
+        strat_summary.columns = ["Strategy", "Trades", "Avg 1d %", "Avg 5d %", "Best 1d %", "Worst 1d %", "Win rate %"]
+        st.dataframe(strat_summary, use_container_width=True, hide_index=True)
+
+        st.divider()
+
+        # -------------------------------------------------------------------
+        # Filters + full trade log
+        # -------------------------------------------------------------------
+
+        st.subheader("Trade log")
+
+        bf1, bf2, bf3 = st.columns(3)
+        bt_strat  = bf1.selectbox("Strategy", ["All"] + sorted(bt_df["strategy"].unique().tolist()), key="bt_strat")
+        bt_asset  = bf2.selectbox("Asset",    ["All", "equity", "crypto"], key="bt_asset")
+        bt_score  = bf3.slider("Min score", 0, 4, 0, key="bt_score")
+
+        filtered_bt = bt_df.copy()
+        if bt_strat != "All":
+            filtered_bt = filtered_bt[filtered_bt["strategy"] == bt_strat]
+        if bt_asset != "All":
+            filtered_bt = filtered_bt[filtered_bt["asset"] == bt_asset]
+        filtered_bt = filtered_bt[filtered_bt["score"] >= bt_score]
+        filtered_bt = filtered_bt.sort_values(["run_date", "score"], ascending=[False, False])
+
+        display_cols = ["run_date", "ticker", "strategy", "score",
+                        "entry_price", "return_1d", "return_3d", "return_5d", "return_10d"]
+        display_cols = [c for c in display_cols if c in filtered_bt.columns]
+
+        st.caption(f"{len(filtered_bt)} trades")
+        st.dataframe(
+            filtered_bt[display_cols],
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "return_1d":  st.column_config.NumberColumn("1d %",  format="%+.2f%%"),
+                "return_3d":  st.column_config.NumberColumn("3d %",  format="%+.2f%%"),
+                "return_5d":  st.column_config.NumberColumn("5d %",  format="%+.2f%%"),
+                "return_10d": st.column_config.NumberColumn("10d %", format="%+.2f%%"),
+                "score":      st.column_config.NumberColumn("Score",  format="%d/4"),
+            },
+        )
+
+
+# ===========================================================================
+# TAB 5 — Advice
+# ===========================================================================
+
+with tab_advice:
+
+    # -----------------------------------------------------------------------
+    # Helpers
+    # -----------------------------------------------------------------------
+
+    def signal_reasons(row: pd.Series) -> list[str]:
+        """Plain-English reasons why this stock scored what it scored."""
+        reasons = []
+        is_crypto = str(row.get("ticker", "")).endswith("-USD")
+
+        if row.get("macd", 0) > row.get("macd_signal", 0):
+            reasons.append("MACD crossed above signal — momentum turning up")
+
+        if is_crypto:
+            if row.get("ema9", 0) > row.get("ema20", 0):
+                reasons.append("EMA9 above EMA20 — short-term trend is bullish")
+            if row.get("rvol", 0) >= 1.5:
+                reasons.append(f"RVOL {row['rvol']:.1f}× — above-average participation")
+            rsi = row.get("rsi", 50)
+            if 40 <= rsi <= 75:
+                reasons.append(f"RSI {rsi:.0f} — in momentum zone, not yet exhausted")
+            elif rsi > 75:
+                reasons.append(f"RSI {rsi:.0f} — overbought, risk of pullback")
+        else:
+            ema9, ema20, ema200 = row.get("ema9", 0), row.get("ema20", 0), row.get("ema200", 0)
+            if ema9 > ema20 > ema200:
+                reasons.append("EMA9 > EMA20 > EMA200 — trend aligned across all timeframes")
+            elif ema9 > ema20:
+                reasons.append("EMA9 above EMA20 — short-term trend bullish but below 200")
+            if row.get("price", 0) > row.get("vwap", 0):
+                reasons.append("Price above VWAP — buyers in control")
+            if row.get("volume_trend_up") == 1:
+                reasons.append("3-day volume trend rising — institutional accumulation signal")
+            if row.get("rvol", 0) >= 3:
+                reasons.append(f"RVOL {row['rvol']:.1f}× — heavy unusual volume, something is moving this")
+            elif row.get("rvol", 0) >= 1.5:
+                reasons.append(f"RVOL {row['rvol']:.1f}× — above-average volume")
+
+        return reasons
+
+    def entry_advice(row: pd.Series) -> str:
+        is_crypto = str(row.get("ticker", "")).endswith("-USD")
+        if is_crypto:
+            return (
+                "Wait for 15m RVOL to spike above 1.5× before entering — "
+                "run scan_intraday.py to catch the signal. Enter on a 15m candle close above the current price."
+            )
+        return (
+            "Watch the first 15-minute candle after open. Enter on a break above its high "
+            "with volume confirming (RVOL ≥ 2× on the intraday scan). "
+            "Do not chase if the stock has already moved more than 5% before you enter."
+        )
+
+    def sizing_advice(row: pd.Series, risk_nzd: float, nzdusd: float) -> str:
+        price     = row.get("price", 0)
+        stop      = row.get("stop_loss", 0)
+        if not price or not stop or price <= stop:
+            return "Stop loss not calculable — skip position sizing."
+        stop_dist_usd = price - stop
+        stop_dist_nzd = stop_dist_usd / nzdusd if nzdusd else stop_dist_usd
+        if stop_dist_nzd <= 0:
+            return "Stop distance is zero — do not trade."
+        shares    = risk_nzd / stop_dist_nzd
+        cost_nzd  = shares * price / nzdusd if nzdusd else shares * price
+        target    = round(price + 2 * stop_dist_usd, 4)   # 2:1 R/R
+        return (
+            f"Risk NZD {risk_nzd:.0f} → **{shares:.1f} shares** "
+            f"(position ≈ NZD {cost_nzd:,.0f})  |  "
+            f"Stop: ${stop:.4f}  |  Target (2:1): ${target:.4f}"
+        )
+
+    # -----------------------------------------------------------------------
+    # Load data
+    # -----------------------------------------------------------------------
+
+    if not dates:
+        st.info("No screener data yet. Run `python3 run.py` first.")
+    else:
+        latest_date = dates[0]
+
+        conn = get_conn()
+        today_df = pd.read_sql(
+            "SELECT * FROM results WHERE run_date = ? ORDER BY score DESC, change_pct DESC",
+            conn, params=(latest_date,)
+        )
+
+        bt_exists = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='backtest'"
+        ).fetchone()
+        missed_df = pd.read_sql(
+            """
+            SELECT b.run_date, b.ticker, b.strategy, b.score,
+                   b.entry_price, b.return_1d, b.return_3d, b.return_5d
+            FROM backtest b
+            WHERE b.score >= 3
+              AND b.return_1d IS NOT NULL
+              AND b.run_date < ?
+            ORDER BY b.return_1d DESC
+            """,
+            conn, params=(latest_date,)
+        ) if bt_exists else pd.DataFrame()
+        conn.close()
+
+        nzdusd = fetch_nzdusd()
+
+        # -----------------------------------------------------------------------
+        # Position size risk input
+        # -----------------------------------------------------------------------
+
+        st.subheader("Risk per trade")
+        risk_nzd = st.number_input(
+            "How much NZD are you willing to lose if this trade hits stop?",
+            min_value=10.0, max_value=10000.0, value=150.0, step=10.0,
+            help="This is your maximum loss per trade, not your position size. "
+                 "Position size is calculated from this and the stop distance."
+        )
+
+        st.divider()
+
+        # -----------------------------------------------------------------------
+        # Top picks — score 3 and 4
+        # -----------------------------------------------------------------------
+
+        top_picks = today_df[today_df["score"] >= 3]
+
+        st.subheader(f"Today's top picks  —  {latest_date}")
+
+        if top_picks.empty:
+            st.warning("No stocks scored 3 or higher today. Check back after the next screener run.")
+        else:
+            for _, row in top_picks.iterrows():
+                ticker = row["ticker"]
+                score  = int(row["score"])
+                stars  = "★" * score + "☆" * (4 - score)
+
+                with st.container(border=True):
+                    c1, c2, c3, c4 = st.columns([2, 1, 1, 1])
+                    c1.markdown(f"### {ticker}  `{stars}`")
+                    c2.metric("Score",    f"{score}/4")
+                    c3.metric("Change",   f"{row['change_pct']:+.2f}%")
+                    c4.metric("RVOL",     f"{row['rvol']:.1f}×")
+
+                    reasons = signal_reasons(row)
+                    if reasons:
+                        st.markdown("**Why it scored:**")
+                        for r in reasons:
+                            st.markdown(f"- {r}")
+
+                    st.markdown("**Entry:**")
+                    st.markdown(entry_advice(row))
+
+                    st.markdown("**Position size:**")
+                    st.markdown(sizing_advice(row, risk_nzd, nzdusd))
+
+                    with st.expander("Full indicators"):
+                        ind_cols = ["price", "stop_loss", "rsi", "rvol",
+                                    "ema9", "ema20", "ema200", "macd", "macd_signal", "vwap"]
+                        ind_cols = [c for c in ind_cols if c in row.index]
+                        st.dataframe(
+                            pd.DataFrame(row[ind_cols]).T,
+                            use_container_width=True, hide_index=True,
+                        )
+
+        st.divider()
+
+        # -----------------------------------------------------------------------
+        # What you missed — previous score 3-4 picks with outcomes
+        # -----------------------------------------------------------------------
+
+        st.subheader("What you missed")
+        st.caption("Previous screener runs that scored 3 or higher — and what happened next.")
+
+        if missed_df.empty:
+            st.info("No historical high-score picks with forward returns yet. Run `python3 backtest.py` after each session.")
+        else:
+            for _, row in missed_df.iterrows():
+                r1  = row.get("return_1d")
+                r3  = row.get("return_3d")
+                r5  = row.get("return_5d")
+                direction = "up" if (r1 or 0) > 0 else "down"
+                color     = "green" if direction == "up" else "red"
+
+                with st.container(border=True):
+                    c1, c2, c3, c4, c5 = st.columns([2, 1, 1, 1, 1])
+                    c1.markdown(f"**{row['ticker']}**  `{row['run_date']}`  score {int(row['score'])}/4")
+                    c2.metric("Entry",  f"${row['entry_price']:.2f}")
+                    c3.metric("1d",     f"{r1:+.1f}%" if r1 is not None else "—")
+                    c4.metric("3d",     f"{r3:+.1f}%" if r3 is not None else "—")
+                    c5.metric("5d",     f"{r5:+.1f}%" if r5 is not None else "—")
+
+
+
+
+# ===========================================================================
+# TAB 6 — Options
+# ===========================================================================
+
+# ---------------------------------------------------------------------------
+# Black-Scholes (no scipy)
+# ---------------------------------------------------------------------------
+
+def _ncdf(x: float) -> float:
+    return (1.0 + math.erf(x / math.sqrt(2.0))) / 2.0
+
+def _npdf(x: float) -> float:
+    return math.exp(-0.5 * x * x) / math.sqrt(2.0 * math.pi)
+
+def bs_price(S, K, T, r, sigma, opt="call") -> float:
+    if T <= 0 or sigma <= 0 or S <= 0 or K <= 0:
+        return max(S - K, 0) if opt == "call" else max(K - S, 0)
+    try:
+        d1 = (math.log(S / K) + (r + 0.5 * sigma**2) * T) / (sigma * math.sqrt(T))
+        d2 = d1 - sigma * math.sqrt(T)
+        if opt == "call":
+            return S * _ncdf(d1) - K * math.exp(-r * T) * _ncdf(d2)
+        return K * math.exp(-r * T) * _ncdf(-d2) - S * _ncdf(-d1)
+    except Exception:
+        return 0.0
+
+def bs_greeks(S, K, T, r, sigma, opt="call") -> dict:
+    zero = {"delta": 0.0, "gamma": 0.0, "theta": 0.0, "vega": 0.0}
+    if T <= 0 or sigma <= 0 or S <= 0 or K <= 0:
+        return zero
+    try:
+        d1 = (math.log(S / K) + (r + 0.5 * sigma**2) * T) / (sigma * math.sqrt(T))
+        d2 = d1 - sigma * math.sqrt(T)
+        pdf1  = _npdf(d1)
+        gamma = pdf1 / (S * sigma * math.sqrt(T))
+        vega  = S * pdf1 * math.sqrt(T) / 100
+        if opt == "call":
+            delta = _ncdf(d1)
+            theta = (-(S * pdf1 * sigma) / (2 * math.sqrt(T))
+                     - r * K * math.exp(-r * T) * _ncdf(d2)) / 365
+        else:
+            delta = _ncdf(d1) - 1
+            theta = (-(S * pdf1 * sigma) / (2 * math.sqrt(T))
+                     + r * K * math.exp(-r * T) * _ncdf(-d2)) / 365
+        return {"delta": round(delta,3), "gamma": round(gamma,5),
+                "theta": round(theta,4), "vega": round(vega,4)}
+    except Exception:
+        return zero
+
+@st.cache_data(ttl=300)
+def get_chain(ticker: str, expiry: str):
+    tk    = yf.Ticker(ticker)
+    chain = tk.option_chain(expiry)
+    spot  = float(tk.fast_info.get("last_price") or 0)
+    return chain.calls, chain.puts, spot
+
+@st.cache_data(ttl=3600)
+def get_rv30(ticker: str) -> float | None:
+    try:
+        hist = yf.Ticker(ticker).history(period="90d", interval="1d")
+        if len(hist) < 31:
+            return None
+        lr = np.log(hist["Close"] / hist["Close"].shift(1)).dropna()
+        return float(lr.tail(30).std() * math.sqrt(252))
+    except Exception:
+        return None
+
+def enrich_chain(df, spot, expiry_str, opt_type, r=0.045):
+    today  = datetime.utcnow().date()
+    exp_dt = datetime.strptime(expiry_str, "%Y-%m-%d").date()
+    T      = max((exp_dt - today).days, 0) / 365.0
+    rows = []
+    for _, row in df.iterrows():
+        K   = float(row["strike"])
+        iv  = float(row["impliedVolatility"]) if row.get("impliedVolatility", 0) > 0 else 0.0
+        bid = float(row.get("bid") or 0)
+        ask = float(row.get("ask") or 0)
+        mid = round((bid + ask) / 2, 3) if ask > 0 else 0.0
+        prem = mid or float(row.get("lastPrice") or 0)
+        g   = bs_greeks(spot, K, T, r, iv, opt_type)
+        be  = round(K + prem, 2) if opt_type == "call" else round(K - prem, 2)
+        rows.append({
+            "Strike": K, "ITM": (spot > K) if opt_type == "call" else (spot < K),
+            "Bid": round(bid,3), "Ask": round(ask,3), "Mid": mid,
+            "IV %": round(iv*100, 1),
+            "Delta": g["delta"], "Gamma": g["gamma"],
+            "Theta/day": g["theta"], "Vega/1%": g["vega"],
+            "OI": int(row.get("openInterest") or 0),
+            "Volume": int(row.get("volume") or 0),
+            "Break-even": be,
+        })
+    out = pd.DataFrame(rows)
+    return out[(out["Bid"] > 0) | (out["OI"] > 0)].reset_index(drop=True)
+
+def payoff_df(spot, legs, price_range_pct=0.30):
+    """
+    legs: list of dicts — {type, strike, premium, qty, position}
+      type: 'call' or 'put'
+      position: 'long' (+1) or 'short' (-1)
+      qty: number of contracts
+    Returns DataFrame {Stock price, P&L (per share)}
+    """
+    lo = spot * (1 - price_range_pct)
+    hi = spot * (1 + price_range_pct)
+    prices = np.linspace(lo, hi, 200)
+    total_pnl = np.zeros(len(prices))
+    for leg in legs:
+        K      = leg["strike"]
+        prem   = leg["premium"]
+        pos    = 1 if leg["position"] == "long" else -1
+        qty    = leg.get("qty", 1)
+        if leg["type"] == "call":
+            intrinsic = np.maximum(prices - K, 0)
+        else:
+            intrinsic = np.maximum(K - prices, 0)
+        total_pnl += pos * qty * (intrinsic - prem)
+    return pd.DataFrame({"Stock price": prices, "P&L per share": total_pnl})
+
+
+with tab_options:
+
+    RISK_FREE = 0.045
+
+    opt_sub = st.radio(
+        "Section",
+        ["Chain & Position", "Strategy Builder", "Backtest"],
+        horizontal=True,
+    )
+
+    # -----------------------------------------------------------------------
+    # Shared ticker picker
+    # -----------------------------------------------------------------------
+
+    if dates:
+        conn = get_conn()
+        eq_tickers = pd.read_sql(
+            "SELECT DISTINCT ticker FROM results WHERE run_date=? AND asset='equity'",
+            conn, params=(dates[0],),
+        )["ticker"].tolist()
+        conn.close()
+    else:
+        eq_tickers = []
+
+    ot1, ot2 = st.columns([2, 3])
+    manual_t = ot1.text_input("Ticker", placeholder="META, INTC, NVDA …").strip().upper()
+    pick_t   = ot2.selectbox("Or from today's screener", ["—"] + sorted(eq_tickers), key="opt_t")
+    opt_ticker = manual_t or (pick_t if pick_t != "—" else "")
+
+    st.divider()
+
+    # =======================================================================
+    # SECTION A — Chain & Position
+    # =======================================================================
+
+    if opt_sub == "Chain & Position":
+
+        if not opt_ticker:
+            st.info("Enter a ticker to load its options chain.")
+        else:
+            try:
+                tk      = yf.Ticker(opt_ticker)
+                expiries = tk.options
+                spot    = float(tk.fast_info.get("last_price") or 0)
+                rv30    = get_rv30(opt_ticker)
+
+                if not expiries:
+                    st.warning(f"No options data for {opt_ticker}.")
+                else:
+                    # Spot + RV
+                    mc1, mc2 = st.columns(2)
+                    mc1.metric("Spot price", f"${spot:.2f}")
+                    if rv30:
+                        mc2.metric("30d Realised Vol", f"{rv30*100:.1f}%",
+                                   help="Compare to option IV. IV >> RV = expensive options.")
+
+                    # Expiry
+                    today_dt = datetime.utcnow().date()
+                    exp_opts = []
+                    for e in expiries:
+                        dte = (datetime.strptime(e, "%Y-%m-%d").date() - today_dt).days
+                        tag = "weekly" if dte <= 14 else ("near" if dte <= 45 else ("mid" if dte <= 90 else "far"))
+                        exp_opts.append((f"{e}  ({dte}d — {tag})", e))
+
+                    sel_exp_label = st.selectbox("Expiry", [l for l,_ in exp_opts],
+                        help="30–60 DTE = sweet spot for buying. Under 7d: theta accelerates sharply.")
+                    sel_exp = dict(exp_opts)[sel_exp_label]
+                    dte_days = (datetime.strptime(sel_exp, "%Y-%m-%d").date() - today_dt).days
+
+                    # IV vs RV warning
+                    calls_raw, puts_raw, _ = get_chain(opt_ticker, sel_exp)
+                    atm_iv_rows = calls_raw[
+                        (calls_raw["strike"].between(spot*0.95, spot*1.05)) &
+                        (calls_raw["impliedVolatility"] > 0)
+                    ]
+                    atm_iv = float(atm_iv_rows["impliedVolatility"].mean()) if not atm_iv_rows.empty else None
+
+                    if atm_iv and rv30:
+                        if atm_iv > rv30 * 1.3:
+                            st.warning(f"ATM IV {atm_iv*100:.0f}% is {((atm_iv/rv30-1)*100):.0f}% above 30d realised vol ({rv30*100:.0f}%) — options are expensive. IV often compresses after entry.")
+                        elif atm_iv < rv30 * 0.85:
+                            st.success(f"ATM IV {atm_iv*100:.0f}% is below 30d realised vol ({rv30*100:.0f}%) — options are relatively cheap.")
+                        else:
+                            st.info(f"ATM IV {atm_iv*100:.0f}%  |  30d RV {rv30*100:.0f}% — fairly priced.")
+
+                    # Chain
+                    opt_type_sel = st.radio("Type", ["Calls", "Puts"], horizontal=True, key="chain_type")
+                    raw = calls_raw if opt_type_sel == "Calls" else puts_raw
+                    otype = "call" if opt_type_sel == "Calls" else "put"
+                    chain_df = enrich_chain(raw, spot, sel_exp, otype)
+
+                    if chain_df.empty:
+                        st.info("No liquid contracts for this expiry.")
+                    else:
+                        st.dataframe(chain_df, use_container_width=True, hide_index=True,
+                            column_config={
+                                "ITM":        st.column_config.CheckboxColumn("ITM"),
+                                "IV %":       st.column_config.NumberColumn("IV %",      format="%.1f%%"),
+                                "Theta/day":  st.column_config.NumberColumn("Theta/day", format="%.4f"),
+                                "Vega/1%":    st.column_config.NumberColumn("Vega/1%",   format="%.4f"),
+                                "Break-even": st.column_config.NumberColumn("Break-even",format="$%.2f"),
+                            })
+
+                        st.caption("**Delta** — moves per $1 stock move.  **Theta** — daily decay cost.  **Vega** — gain/loss per 1% IV change.")
+
+                        st.divider()
+
+                        # Position builder
+                        st.subheader("Position builder")
+                        nzdusd_o = fetch_nzdusd()
+                        pb1, pb2 = st.columns(2)
+                        sel_strike = pb1.selectbox("Strike", chain_df["Strike"].tolist(), key="pb_strike")
+                        n_contracts = pb2.number_input("Contracts (1 = 100 shares)", 1, 50, 1, key="pb_c")
+
+                        sel_row = chain_df[chain_df["Strike"] == sel_strike]
+                        if not sel_row.empty:
+                            s = sel_row.iloc[0]
+                            prem = s["Mid"] if s["Mid"] > 0 else s["Ask"]
+                            cost_usd = prem * 100 * n_contracts
+                            cost_nzd = cost_usd / nzdusd_o if nzdusd_o else cost_usd
+                            be = s["Break-even"]
+                            move_pct = abs(be - spot) / spot * 100
+
+                            r1c, r2c, r3c, r4c = st.columns(4)
+                            r1c.metric("Premium (mid)", f"${prem:.3f}")
+                            r2c.metric("Total cost", f"NZD {cost_nzd:,.0f}", help="Your max loss if option expires worthless.")
+                            r3c.metric("Break-even", f"${be:.2f}")
+                            r4c.metric("Move needed", f"{move_pct:.1f}%")
+
+                            st.markdown(
+                                f"Delta {s['Delta']:+.3f} — option moves ~${abs(s['Delta'])*100*n_contracts:.0f} per $1 stock move.  "
+                                f"Theta {s['Theta/day']:.4f} — costs ~NZD {abs(s['Theta/day'])*100*n_contracts/nzdusd_o:.2f}/day.  "
+                                f"IV {s['IV %']:.1f}%  |  {dte_days}d to expiry."
+                            )
+            except Exception as e:
+                st.error(f"Could not load options for {opt_ticker}: {e}")
+
+    # =======================================================================
+    # SECTION B — Strategy Builder
+    # =======================================================================
+
+    elif opt_sub == "Strategy Builder":
+
+        STRATEGIES_DEF = {
+            "Long Call": {
+                "desc": "Bullish. Buy one call. Profits if stock rises above break-even. Max loss = premium paid.",
+                "legs": 1, "bias": "bullish",
+                "when": "Strong directional conviction upward. IV is low/fair. At least 30 DTE.",
+            },
+            "Bull Call Spread": {
+                "desc": "Bullish with reduced cost. Buy lower-strike call, sell higher-strike call. Caps both risk and profit.",
+                "legs": 2, "bias": "bullish",
+                "when": "Moderately bullish. IV is high (spread reduces vega exposure). Want to cut cost.",
+            },
+            "Long Put": {
+                "desc": "Bearish. Buy one put. Profits if stock falls below break-even. Max loss = premium paid.",
+                "legs": 1, "bias": "bearish",
+                "when": "Strong conviction downward (e.g. heading into bad earnings). IV is low.",
+            },
+            "Bear Put Spread": {
+                "desc": "Bearish with reduced cost. Buy higher-strike put, sell lower-strike put.",
+                "legs": 2, "bias": "bearish",
+                "when": "Moderately bearish. IV is elevated. Want to reduce premium outlay.",
+            },
+            "Cash-Secured Put": {
+                "desc": "Income / stock entry strategy. Sell a put, collect premium. If stock falls to strike you buy the shares at a discount.",
+                "legs": 1, "bias": "neutral-bullish",
+                "when": "Happy to own the stock at the strike price. IV is high (premium collection).",
+            },
+            "Covered Call": {
+                "desc": "Income on existing position. Sell a call against shares you own. Caps upside, reduces cost basis.",
+                "legs": 1, "bias": "neutral",
+                "when": "Already long the stock. Want income. Expect sideways to slight upside.",
+            },
+        }
+
+        strat_name = st.selectbox("Strategy", list(STRATEGIES_DEF.keys()))
+        sdef = STRATEGIES_DEF[strat_name]
+
+        st.info(f"**{strat_name}** — {sdef['desc']}\n\n**Use when:** {sdef['when']}")
+
+        if not opt_ticker:
+            st.warning("Enter a ticker above to build this strategy.")
+        else:
+            try:
+                tk       = yf.Ticker(opt_ticker)
+                expiries = tk.options
+                spot     = float(tk.fast_info.get("last_price") or 0)
+                rv30     = get_rv30(opt_ticker)
+
+                if not expiries:
+                    st.warning(f"No options data for {opt_ticker}.")
+                else:
+                    today_dt = datetime.utcnow().date()
+                    exp_opts = [(f"{e}  ({(datetime.strptime(e,'%Y-%m-%d').date()-today_dt).days}d)", e) for e in expiries]
+                    sel_exp_label = st.selectbox("Expiry", [l for l,_ in exp_opts], key="sb_exp")
+                    sel_exp = dict(exp_opts)[sel_exp_label]
+                    dte_days = (datetime.strptime(sel_exp, "%Y-%m-%d").date() - today_dt).days
+                    T = max(dte_days / 365.0, 0)
+                    rv = rv30 or 0.30
+
+                    calls_raw, puts_raw, _ = get_chain(opt_ticker, sel_exp)
+
+                    nzdusd_s = fetch_nzdusd()
+                    legs = []
+
+                    if strat_name == "Long Call":
+                        strikes = sorted(calls_raw[calls_raw["bid"] > 0]["strike"].tolist())
+                        k1 = st.selectbox("Strike", strikes, index=min(len(strikes)//2, len(strikes)-1), key="lc_k1")
+                        row1 = calls_raw[calls_raw["strike"] == k1].iloc[0]
+                        prem1 = float((row1.get("bid",0) + row1.get("ask",0)) / 2 or row1.get("lastPrice",0))
+                        legs = [{"type":"call","strike":k1,"premium":prem1,"qty":1,"position":"long"}]
+
+                    elif strat_name == "Bull Call Spread":
+                        strikes = sorted(calls_raw[calls_raw["bid"] > 0]["strike"].tolist())
+                        sb1, sb2 = st.columns(2)
+                        k1 = sb1.selectbox("Buy strike (lower)", strikes, key="bcs_k1")
+                        k2_opts = [s for s in strikes if s > k1]
+                        if k2_opts:
+                            k2 = sb2.selectbox("Sell strike (higher)", k2_opts, key="bcs_k2")
+                            r1b = calls_raw[calls_raw["strike"]==k1].iloc[0]
+                            r2b = calls_raw[calls_raw["strike"]==k2].iloc[0]
+                            p1 = float((r1b.get("bid",0)+r1b.get("ask",0))/2 or r1b.get("lastPrice",0))
+                            p2 = float((r2b.get("bid",0)+r2b.get("ask",0))/2 or r2b.get("lastPrice",0))
+                            legs = [
+                                {"type":"call","strike":k1,"premium":p1,"qty":1,"position":"long"},
+                                {"type":"call","strike":k2,"premium":p2,"qty":1,"position":"short"},
+                            ]
+
+                    elif strat_name == "Long Put":
+                        strikes = sorted(puts_raw[puts_raw["bid"] > 0]["strike"].tolist(), reverse=True)
+                        k1 = st.selectbox("Strike", strikes, key="lp_k1")
+                        row1 = puts_raw[puts_raw["strike"]==k1].iloc[0]
+                        prem1 = float((row1.get("bid",0)+row1.get("ask",0))/2 or row1.get("lastPrice",0))
+                        legs = [{"type":"put","strike":k1,"premium":prem1,"qty":1,"position":"long"}]
+
+                    elif strat_name == "Bear Put Spread":
+                        strikes = sorted(puts_raw[puts_raw["bid"] > 0]["strike"].tolist(), reverse=True)
+                        bp1, bp2 = st.columns(2)
+                        k1 = bp1.selectbox("Buy strike (higher)", strikes, key="bps_k1")
+                        k2_opts = [s for s in strikes if s < k1]
+                        if k2_opts:
+                            k2 = bp2.selectbox("Sell strike (lower)", k2_opts, key="bps_k2")
+                            r1p = puts_raw[puts_raw["strike"]==k1].iloc[0]
+                            r2p = puts_raw[puts_raw["strike"]==k2].iloc[0]
+                            p1 = float((r1p.get("bid",0)+r1p.get("ask",0))/2 or r1p.get("lastPrice",0))
+                            p2 = float((r2p.get("bid",0)+r2p.get("ask",0))/2 or r2p.get("lastPrice",0))
+                            legs = [
+                                {"type":"put","strike":k1,"premium":p1,"qty":1,"position":"long"},
+                                {"type":"put","strike":k2,"premium":p2,"qty":1,"position":"short"},
+                            ]
+
+                    elif strat_name == "Cash-Secured Put":
+                        strikes = sorted(puts_raw[puts_raw["bid"] > 0]["strike"].tolist(), reverse=True)
+                        k1 = st.selectbox("Strike to sell", strikes, key="csp_k1")
+                        row1 = puts_raw[puts_raw["strike"]==k1].iloc[0]
+                        prem1 = float((row1.get("bid",0)+row1.get("ask",0))/2 or row1.get("lastPrice",0))
+                        legs = [{"type":"put","strike":k1,"premium":prem1,"qty":1,"position":"short"}]
+
+                    elif strat_name == "Covered Call":
+                        strikes = sorted(calls_raw[calls_raw["bid"] > 0]["strike"].tolist())
+                        k1 = st.selectbox("Strike to sell", strikes, key="cc_k1")
+                        row1 = calls_raw[calls_raw["strike"]==k1].iloc[0]
+                        prem1 = float((row1.get("bid",0)+row1.get("ask",0))/2 or row1.get("lastPrice",0))
+                        legs = [{"type":"call","strike":k1,"premium":prem1,"qty":1,"position":"short"}]
+
+                    if legs:
+                        net_debit = sum(
+                            (l["premium"] if l["position"]=="long" else -l["premium"]) * l["qty"]
+                            for l in legs
+                        )
+                        max_profit = max_loss = None
+
+                        if strat_name == "Long Call":
+                            max_loss   = round(net_debit * 100, 2)
+                            max_profit = "Unlimited"
+                            be_price   = round(legs[0]["strike"] + net_debit, 2)
+                        elif strat_name == "Bull Call Spread":
+                            width = legs[1]["strike"] - legs[0]["strike"]
+                            max_profit = round((width - net_debit) * 100, 2)
+                            max_loss   = round(net_debit * 100, 2)
+                            be_price   = round(legs[0]["strike"] + net_debit, 2)
+                        elif strat_name == "Long Put":
+                            max_loss   = round(net_debit * 100, 2)
+                            max_profit = round((legs[0]["strike"] - net_debit) * 100, 2)
+                            be_price   = round(legs[0]["strike"] - net_debit, 2)
+                        elif strat_name == "Bear Put Spread":
+                            width = legs[0]["strike"] - legs[1]["strike"]
+                            max_profit = round((width - net_debit) * 100, 2)
+                            max_loss   = round(net_debit * 100, 2)
+                            be_price   = round(legs[0]["strike"] - net_debit, 2)
+                        elif strat_name == "Cash-Secured Put":
+                            max_profit = round(abs(net_debit) * 100, 2)
+                            max_loss   = round((legs[0]["strike"] - abs(net_debit)) * 100, 2)
+                            be_price   = round(legs[0]["strike"] - abs(net_debit), 2)
+                        elif strat_name == "Covered Call":
+                            max_profit = round((legs[0]["strike"] - spot + abs(net_debit)) * 100, 2)
+                            max_loss   = "Unlimited downside on shares"
+                            be_price   = round(spot - abs(net_debit), 2)
+
+                        n_contracts_s = st.number_input("Contracts", 1, 50, 1, key="sb_contracts")
+                        cost_nzd = abs(net_debit) * 100 * n_contracts_s / (nzdusd_s or 0.57)
+
+                        sm1, sm2, sm3, sm4 = st.columns(4)
+                        sm1.metric("Net debit/credit", f"${net_debit:+.3f}")
+                        sm2.metric("Total cost", f"NZD {cost_nzd:,.0f}")
+                        sm3.metric("Max loss", f"${max_loss}" if isinstance(max_loss, str) else f"${max_loss:,.0f}")
+                        sm4.metric("Max profit", f"${max_profit}" if isinstance(max_profit, str) else f"${max_profit:,.0f}")
+
+                        st.metric("Break-even at expiry", f"${be_price:.2f}",
+                                  delta=f"{((be_price/spot-1)*100):+.1f}% from spot")
+
+                        # Payoff diagram
+                        st.subheader("Payoff at expiry")
+                        pnl = payoff_df(spot, legs)
+                        pnl_display = pnl.set_index("Stock price")
+                        st.line_chart(pnl_display)
+                        st.caption("Shows profit/loss per share at expiry across a ±30% price range. Multiply by 100 × contracts for total P&L.")
+
+            except Exception as e:
+                st.error(f"Strategy builder error for {opt_ticker}: {e}")
+
+    # =======================================================================
+    # SECTION C — Backtest
+    # =======================================================================
+
+    else:  # Backtest
+
+        conn = get_conn()
+        bt_opt_exists = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='backtest_options'"
+        ).fetchone()
+        bt_opt = pd.read_sql("SELECT * FROM backtest_options", conn) if bt_opt_exists else pd.DataFrame()
+        conn.close()
+
+        if bt_opt.empty:
+            st.info("No options backtest data yet.")
+            st.code("python3 options_backtest.py", language="bash")
+            st.markdown(
+                "This simulates buying ATM and OTM calls on each screener pick using "
+                "Black-Scholes with 30-day realised volatility as the IV input. "
+                "Run it after each session alongside `backtest.py`."
+            )
+            st.warning(
+                "**Important:** IV crush is not modelled. Simulated returns assume IV stays constant. "
+                "Real options bought into high-IV spikes will perform worse than shown here."
+            )
+        else:
+            bt_opt_fwd = bt_opt.dropna(subset=["return_1d"])
+
+            # Top metrics
+            bm1, bm2, bm3 = st.columns(3)
+            bm1.metric("Simulated trades",  len(bt_opt_fwd))
+            bm2.metric("Avg return 1d (ATM 30d)",
+                round(bt_opt_fwd[bt_opt_fwd["strategy_name"]=="atm_call_30d"]["return_1d"].mean(), 1),
+                help="Average % return on ATM 30DTE calls held 1 day.")
+            bm3.metric("Win rate 1d (ATM 30d)",
+                f"{(bt_opt_fwd[bt_opt_fwd['strategy_name']=='atm_call_30d']['return_1d']>0).mean()*100:.0f}%")
+
+            st.warning(
+                "IV crush not modelled. These returns assume implied volatility stays constant "
+                "after entry. In practice, buying options into high-RVOL moves often results in "
+                "IV compression that erodes returns even when the stock moves in your favour."
+            )
+
+            st.divider()
+
+            # Return by strategy + score
+            st.subheader("Return by strategy and score")
+            summary = (
+                bt_opt_fwd.groupby(["strategy_name", "screener_score"])
+                .agg(
+                    trades    =("return_1d", "count"),
+                    avg_1d    =("return_1d", "mean"),
+                    avg_3d    =("return_3d", "mean"),
+                    avg_5d    =("return_5d", "mean"),
+                    win_rate  =("return_1d", lambda x: (x>0).mean()*100),
+                )
+                .round(1)
+                .reset_index()
+            )
+            summary.columns = ["Strategy", "Score", "Trades", "Avg 1d %", "Avg 3d %", "Avg 5d %", "Win rate %"]
+            st.dataframe(summary, use_container_width=True, hide_index=True)
+
+            st.divider()
+
+            # Equity vs Options comparison for same picks
+            st.subheader("Equity vs options — same screener picks")
+            conn = get_conn()
+            eq_bt = pd.read_sql(
+                "SELECT run_date, ticker, score, return_1d AS eq_1d, return_3d AS eq_3d FROM backtest WHERE return_1d IS NOT NULL",
+                conn,
+            )
+            conn.close()
+
+            if not eq_bt.empty and not bt_opt_fwd.empty:
+                atm = bt_opt_fwd[bt_opt_fwd["strategy_name"]=="atm_call_30d"][
+                    ["run_date","ticker","return_1d","return_3d"]
+                ].rename(columns={"return_1d":"opt_1d","return_3d":"opt_3d"})
+                comp = eq_bt.merge(atm, on=["run_date","ticker"], how="inner")
+                if not comp.empty:
+                    comp_display = comp[["ticker","run_date","score","eq_1d","opt_1d","eq_3d","opt_3d"]].copy()
+                    comp_display.columns = ["Ticker","Date","Score","Equity 1d %","Option 1d %","Equity 3d %","Option 3d %"]
+                    comp_display = comp_display.sort_values("Option 1d %", ascending=False)
+                    st.dataframe(comp_display, use_container_width=True, hide_index=True,
+                        column_config={
+                            "Equity 1d %":  st.column_config.NumberColumn(format="%+.1f%%"),
+                            "Option 1d %":  st.column_config.NumberColumn(format="%+.1f%%"),
+                            "Equity 3d %":  st.column_config.NumberColumn(format="%+.1f%%"),
+                            "Option 3d %":  st.column_config.NumberColumn(format="%+.1f%%"),
+                        })
+                    st.caption("Option returns are simulated (Black-Scholes, constant IV). Use for directional comparison only.")
+
+            st.divider()
+
+            # Full trade log
+            st.subheader("Full options trade log")
+            bf1, bf2 = st.columns(2)
+            filt_strat = bf1.selectbox("Strategy", ["All"] + sorted(bt_opt_fwd["strategy_name"].unique()), key="opt_bt_strat")
+            filt_score = bf2.slider("Min score", 0, 4, 0, key="opt_bt_score")
+            filtered_opt = bt_opt_fwd.copy()
+            if filt_strat != "All":
+                filtered_opt = filtered_opt[filtered_opt["strategy_name"]==filt_strat]
+            filtered_opt = filtered_opt[filtered_opt["screener_score"] >= filt_score]
+            filtered_opt = filtered_opt.sort_values(["run_date","screener_score"], ascending=[False,False])
+
+            log_cols = ["run_date","ticker","screener_score","strategy_name",
+                        "entry_stock_px","strike","entry_iv","entry_opt_px","entry_delta",
+                        "return_1d","return_3d","return_5d","return_10d"]
+            log_cols = [c for c in log_cols if c in filtered_opt.columns]
+            st.caption(f"{len(filtered_opt)} simulated trades")
+            st.dataframe(filtered_opt[log_cols], use_container_width=True, hide_index=True,
+                column_config={
+                    "return_1d":  st.column_config.NumberColumn("1d %",  format="%+.1f%%"),
+                    "return_3d":  st.column_config.NumberColumn("3d %",  format="%+.1f%%"),
+                    "return_5d":  st.column_config.NumberColumn("5d %",  format="%+.1f%%"),
+                    "return_10d": st.column_config.NumberColumn("10d %", format="%+.1f%%"),
+                    "entry_iv":   st.column_config.NumberColumn("IV",    format="%.1%%"),
+                    "screener_score": st.column_config.NumberColumn("Score", format="%d/4"),
+                })
+
+
+# ===========================================================================
+# TAB 7 — Learn
+# ===========================================================================
+
+with tab_learn:
+
+    st.subheader("Options fundamentals")
+    st.caption("Each lesson uses live data from your watchlist and the positions you hold.")
+
+    lesson = st.selectbox("Choose a lesson", [
+        "1. What is an option?",
+        "2. Calls vs Puts",
+        "3. The Greeks — Delta",
+        "4. The Greeks — Theta (time decay)",
+        "5. The Greeks — Vega (implied volatility)",
+        "6. IV crush — the most common way to lose money",
+        "7. Strategies and when to use them",
+        "8. Position sizing and risk management",
+        "9. The most common mistakes",
+    ])
+
+    RISK_FREE_L = 0.045
+
+    # -----------------------------------------------------------------------
+    # Shared live example data (INTC — one of Dave's positions)
+    # -----------------------------------------------------------------------
+
+    @st.cache_data(ttl=600)
+    def learn_example():
+        try:
+            tk    = yf.Ticker("INTC")
+            spot  = float(tk.fast_info.get("last_price") or 62)
+            expiries = tk.options
+            # Pick ~30 DTE expiry
+            today_dt = datetime.utcnow().date()
+            exp = None
+            for e in expiries:
+                dte = (datetime.strptime(e, "%Y-%m-%d").date() - today_dt).days
+                if 20 <= dte <= 50:
+                    exp = e
+                    break
+            exp = exp or expiries[1]
+            chain = tk.option_chain(exp)
+            dte   = (datetime.strptime(exp, "%Y-%m-%d").date() - today_dt).days
+            # Find ATM call
+            calls = chain.calls
+            calls = calls[calls["bid"] > 0]
+            atm   = calls.iloc[(calls["strike"] - spot).abs().argsort()[:1]].iloc[0]
+            K     = float(atm["strike"])
+            iv    = float(atm["impliedVolatility"])
+            bid   = float(atm.get("bid", 0))
+            ask   = float(atm.get("ask", 0))
+            mid   = round((bid + ask) / 2, 3)
+            return {"spot": spot, "exp": exp, "dte": dte, "K": K, "iv": iv, "mid": mid}
+        except Exception:
+            return {"spot": 62.0, "exp": "2026-05-15", "dte": 35, "K": 62.0, "iv": 0.45, "mid": 3.20}
+
+    ex = learn_example()
+    S, K, T_ex, iv_ex, mid_ex = ex["spot"], ex["K"], ex["dte"]/365, ex["iv"], ex["mid"]
+
+    st.divider()
+
+    # =======================================================================
+    if lesson == "1. What is an option?":
+    # =======================================================================
+
+        st.markdown("""
+An option is a **contract** that gives you the right — but not the obligation — to buy or sell a stock at a specific price, before a specific date.
+
+You pay a **premium** upfront. That premium is your maximum loss. The stock moves in your favour, the option gains value. It moves against you, the option loses value — but you can never lose more than what you paid.
+
+**Three things define every option:**
+
+| Term | What it means |
+|---|---|
+| **Strike price** | The price at which you have the right to buy or sell |
+| **Expiry date** | The date the contract expires — after this it's worthless |
+| **Premium** | What you pay to buy the contract (your max loss) |
+
+**Options vs buying stock directly:**
+""")
+
+        nzdusd_l = fetch_nzdusd()
+        shares_direct = round((1000 * nzdusd_l) / S, 4)
+        cost_option   = round(mid_ex * 100, 2)
+        cost_nzd_opt  = round(cost_option / nzdusd_l, 2)
+
+        col1, col2 = st.columns(2)
+        with col1:
+            st.markdown("**Buy INTC stock directly**")
+            st.markdown(f"- Spend NZD 1,000 → get **{shares_direct} shares**")
+            st.markdown(f"- Stock goes up 10% → you make NZD {1000*0.10:.0f}")
+            st.markdown(f"- Stock goes to zero → you lose NZD 1,000")
+
+        with col2:
+            st.markdown("**Buy 1 ATM call option on INTC**")
+            st.markdown(f"- Spend NZD {cost_nzd_opt:.0f} → control **100 shares**")
+            st.markdown(f"- Stock goes up 10% → option might gain 40–60%")
+            st.markdown(f"- Option expires worthless → you lose NZD {cost_nzd_opt:.0f} only")
+
+        st.info(f"Live example: INTC at ${S:.2f}. ATM call (strike ${K:.2f}, expiry {ex['exp']}) costs ${mid_ex:.3f} per share = **${mid_ex*100:.2f} per contract** (NZD {cost_nzd_opt:.0f}).")
+
+        st.markdown("""
+**Key rule:** Options buyers have **limited loss, unlimited upside**.
+Options sellers have **limited upside (the premium), unlimited risk**. Start as a buyer.
+""")
+
+    # =======================================================================
+    elif lesson == "2. Calls vs Puts":
+    # =======================================================================
+
+        st.markdown("""
+**Call option** — you think the stock is going UP.
+Gives you the right to *buy* shares at the strike price.
+
+**Put option** — you think the stock is going DOWN.
+Gives you the right to *sell* shares at the strike price.
+""")
+
+        c1, c2 = st.columns(2)
+        with c1:
+            st.markdown("### Call")
+            st.markdown(f"""
+- You buy a call on INTC at strike **${K:.2f}**
+- If INTC rises to **${K*1.15:.2f}** (+15%), your call is worth at least **${max(K*1.15-K,0):.2f}** in intrinsic value
+- If INTC stays below **${K:.2f}** at expiry → expires worthless, you lose the premium
+- **Use when:** Bullish. RVOL spiking. Score 3–4 on screener.
+""")
+        with c2:
+            st.markdown("### Put")
+            st.markdown(f"""
+- You buy a put on INTC at strike **${K:.2f}**
+- If INTC drops to **${K*0.85:.2f}** (−15%), your put is worth at least **${max(K-K*0.85,0):.2f}** in intrinsic value
+- If INTC stays above **${K:.2f}** at expiry → expires worthless
+- **Use when:** Bearish. Bad earnings expected. Hedging an existing long position.
+""")
+
+        st.divider()
+        st.markdown("**Intrinsic vs extrinsic value**")
+        st.markdown(f"""
+An option's premium has two parts:
+
+- **Intrinsic value** — the profit if you exercised right now. For a call at ${K:.2f} with stock at ${S:.2f}: ${max(S-K,0):.2f}
+- **Extrinsic (time) value** — what you pay for time + volatility. This is **{mid_ex - max(S-K,0):.3f}** of your {mid_ex:.3f} premium.
+
+All extrinsic value goes to zero at expiry. That's why time works against option buyers.
+""")
+
+        iv_pct = round(iv_ex * 100, 1)
+        st.info(f"Live: INTC ATM call premium = ${mid_ex:.3f}. Intrinsic = ${max(S-K,0):.2f}. Time value = ${mid_ex - max(S-K,0):.3f}. Current IV = {iv_pct}%.")
+
+    # =======================================================================
+    elif lesson == "3. The Greeks — Delta":
+    # =======================================================================
+
+        g = bs_greeks(S, K, T_ex, RISK_FREE_L, iv_ex, "call")
+        delta = g["delta"]
+
+        st.markdown(f"""
+**Delta** tells you how much the option price moves for every $1 the stock moves.
+
+INTC ATM call delta = **{delta:.3f}**
+
+This means:
+- Stock goes up $1 → option gains **${delta:.3f}** per share → **${delta*100:.2f} per contract**
+- Stock goes up $5 → option gains approximately **${delta*5:.2f}** per share
+- Stock drops $1 → option loses **${delta:.3f}** per share
+
+**Delta also tells you the approximate probability the option expires in the money.**
+Delta {delta:.2f} ≈ {delta*100:.0f}% chance of expiring with value.
+
+**Delta by strike:**
+""")
+
+        delta_rows = []
+        for moneyness, label in [(0.90,"Deep ITM"), (0.95,"ITM"), (1.00,"ATM"), (1.05,"OTM"), (1.10,"Deep OTM")]:
+            Kx = round(S * moneyness, 2)
+            gx = bs_greeks(S, Kx, T_ex, RISK_FREE_L, iv_ex, "call")
+            delta_rows.append({
+                "Type": label, "Strike": f"${Kx:.2f}",
+                "Delta": gx["delta"],
+                "Approx prob ITM": f"{gx['delta']*100:.0f}%",
+                "Move per $1 stock (per contract)": f"${gx['delta']*100:.2f}",
+            })
+        st.dataframe(pd.DataFrame(delta_rows), use_container_width=True, hide_index=True)
+
+        st.markdown("""
+**What delta to choose?**
+- **0.70+ (deep ITM):** Moves almost like owning stock. Expensive. Lower % return but safer.
+- **0.50 (ATM):** Balanced. Most common starting point.
+- **0.30 (OTM):** Cheap. Needs a bigger move. Higher % return if it works, more often expires worthless.
+- **< 0.20 (far OTM):** Lottery ticket. Rarely pays off. Avoid until you understand options well.
+""")
+
+    # =======================================================================
+    elif lesson == "4. The Greeks — Theta (time decay)":
+    # =======================================================================
+
+        g     = bs_greeks(S, K, T_ex, RISK_FREE_L, iv_ex, "call")
+        theta = g["theta"]
+
+        st.markdown(f"""
+**Theta** is the daily cost of holding an option. Every day that passes, the option loses this much value — even if the stock doesn't move.
+
+INTC ATM call theta = **{theta:.4f}** per share per day = **${abs(theta)*100:.2f} per contract per day**
+
+Over {ex['dte']} days to expiry, that's **${abs(theta)*100*ex['dte']:.2f}** in total time decay — which is most of your premium.
+
+Theta accelerates. It's slow far from expiry and rapid in the last 2 weeks.
+""")
+
+        # Theta decay chart
+        decay_rows = []
+        for days_left in range(ex["dte"], 0, -1):
+            T_temp = days_left / 365.0
+            px = bs_price(S, K, T_temp, RISK_FREE_L, iv_ex, "call")
+            decay_rows.append({"Days to expiry": days_left, "Option value ($)": round(px, 4)})
+        decay_df = pd.DataFrame(decay_rows).set_index("Days to expiry").sort_index()
+        st.line_chart(decay_df)
+        st.caption(f"INTC ATM call (strike ${K:.2f}, IV {iv_ex*100:.0f}%) — value over time assuming stock stays at ${S:.2f}. "
+                   "The curve accelerates downward as expiry approaches.")
+
+        st.markdown("""
+**Rules of thumb:**
+- Hold options for **short periods** when buying — theta is working against you every day
+- Don't hold options into the last 2 weeks unless you're very confident
+- Sellers (cash-secured puts, covered calls) *benefit* from theta — it's working for them
+""")
+
+    # =======================================================================
+    elif lesson == "5. The Greeks — Vega (implied volatility)":
+    # =======================================================================
+
+        g    = bs_greeks(S, K, T_ex, RISK_FREE_L, iv_ex, "call")
+        vega = g["vega"]
+
+        st.markdown(f"""
+**Vega** tells you how much the option price changes for every 1% change in implied volatility (IV).
+
+INTC ATM call vega = **{vega:.4f}** per share = **${vega*100:.2f} per contract** per 1% IV move.
+
+If IV rises from {iv_ex*100:.0f}% to {iv_ex*100+5:.0f}% (up 5%), option gains **${vega*5*100:.2f}** per contract — even if the stock doesn't move.
+If IV drops from {iv_ex*100:.0f}% to {iv_ex*100-10:.0f}% (down 10%), option loses **${vega*10*100:.2f}** per contract.
+""")
+
+        # IV sensitivity chart
+        iv_rows = []
+        for iv_pct in range(10, 120, 5):
+            px = bs_price(S, K, T_ex, RISK_FREE_L, iv_pct/100, "call")
+            iv_rows.append({"IV %": iv_pct, "Option value ($)": round(px, 4)})
+        iv_df = pd.DataFrame(iv_rows).set_index("IV %")
+        st.line_chart(iv_df)
+        st.caption(f"INTC ATM call (strike ${K:.2f}, {ex['dte']}d to expiry) — value at different IV levels, stock held at ${S:.2f}.")
+
+        st.markdown(f"""
+**Current INTC IV: {iv_ex*100:.0f}%**
+
+High IV = expensive options. Low IV = cheap options.
+
+**The rule:** Buy options when IV is low. Sell options when IV is high.
+
+The Options tab shows you 30d Realised Vol vs ATM IV for any ticker. 
+If IV is significantly above realised vol, options are expensive — consider a spread instead of an outright buy.
+""")
+
+    # =======================================================================
+    elif lesson == "6. IV crush — the most common way to lose money":
+    # =======================================================================
+
+        st.markdown("""
+**IV crush** happens when implied volatility collapses after a known event — usually earnings.
+
+Before earnings, IV inflates because nobody knows what will happen. Option prices rise.
+After earnings, the uncertainty resolves. IV collapses — sometimes by 30–50% in one day.
+
+**The result:** You buy a call before earnings. The stock goes UP 5%. But your call loses value because IV dropped 40%.
+
+This is the most common way beginners lose money on options.
+""")
+
+        # Show the effect numerically
+        pre_iv  = min(iv_ex * 2.0, 1.5)
+        post_iv = iv_ex * 0.6
+        st.markdown(f"**INTC example (hypothetical earnings scenario):**")
+
+        crush_rows = []
+        for label, s_move, iv_used in [
+            ("Stock flat, pre-earnings IV",      S,       pre_iv),
+            ("Stock +5%, IV crushes post-earn",  S*1.05,  post_iv),
+            ("Stock +10%, IV crushes post-earn", S*1.10,  post_iv),
+            ("Stock +15%, IV crushes post-earn", S*1.15,  post_iv),
+        ]:
+            px = bs_price(s_move, K, T_ex, RISK_FREE_L, iv_used, "call")
+            ret = (px / mid_ex - 1) * 100
+            crush_rows.append({
+                "Scenario":    label,
+                "Stock price": f"${s_move:.2f}",
+                "IV":          f"{iv_used*100:.0f}%",
+                "Option value":f"${px:.3f}",
+                "Return vs entry": f"{ret:+.1f}%",
+            })
+        st.dataframe(pd.DataFrame(crush_rows), use_container_width=True, hide_index=True)
+
+        st.markdown(f"Entry price: ${mid_ex:.3f} at IV {iv_ex*100:.0f}%.")
+
+        st.warning("Stock +5% but option loses money. This is IV crush in action.")
+
+        st.markdown("""
+**How to avoid it:**
+1. Check the IV vs Realised Vol on the Options tab before buying
+2. Avoid buying options in the week before earnings unless you have strong conviction and understand the IV risk
+3. Use spreads instead of outright buys when IV is elevated — the spread reduces your vega exposure
+4. The intraday scanner (scan_intraday.py) fires on RVOL spikes — if you see a spike *after* an earnings gap, IV is already compressing. Enter cautiously.
+""")
+
+    # =======================================================================
+    elif lesson == "7. Strategies and when to use them":
+    # =======================================================================
+
+        st.markdown("Select a strategy to see its payoff and when to use it.")
+
+        strat_pick = st.selectbox("Strategy", [
+            "Long Call", "Bull Call Spread", "Long Put",
+            "Cash-Secured Put", "Covered Call",
+        ], key="learn_strat")
+
+        guides = {
+            "Long Call": {
+                "when":     "Strong bullish conviction. Score 3–4 on screener. IV is low or fair (< 30d RV).",
+                "risk":     "Limited — premium paid only.",
+                "reward":   "Unlimited.",
+                "avoid":    "Before earnings (IV crush). When IV >> realised vol. Far OTM strikes.",
+                "legs":     [{"type":"call","strike":K,"premium":mid_ex,"qty":1,"position":"long"}],
+            },
+            "Bull Call Spread": {
+                "when":     "Bullish but IV is high. Buying the spread reduces your vega risk vs a naked call.",
+                "risk":     "Net debit paid.",
+                "reward":   "Capped at the spread width minus net debit.",
+                "avoid":    "When you have very high conviction — the spread caps your upside.",
+                "legs":     [
+                    {"type":"call","strike":K,       "premium":mid_ex,    "qty":1,"position":"long"},
+                    {"type":"call","strike":K*1.05,  "premium":mid_ex*0.4,"qty":1,"position":"short"},
+                ],
+            },
+            "Long Put": {
+                "when":     "Bearish conviction. Expecting a drop. Or hedging existing long positions.",
+                "risk":     "Premium paid.",
+                "reward":   "Capped at strike price (stock can't go below zero).",
+                "avoid":    "After a stock has already dropped significantly — put premium will be high.",
+                "legs":     [{"type":"put","strike":K,"premium":mid_ex,"qty":1,"position":"long"}],
+            },
+            "Cash-Secured Put": {
+                "when":     "Happy to buy the stock at the strike price. IV is high (collect rich premium). Good entry strategy.",
+                "risk":     "Assigned stock at strike minus premium collected. Same as buying stock at a discount.",
+                "reward":   "Premium collected if stock stays above strike.",
+                "avoid":    "On stocks you do NOT want to own if assigned.",
+                "legs":     [{"type":"put","strike":K,"premium":mid_ex,"qty":1,"position":"short"}],
+            },
+            "Covered Call": {
+                "when":     "Already long the stock (like your META or INTC positions). Want income. Expect sideways to slight upside.",
+                "risk":     "Caps your upside if stock rallies above strike. Still exposed to downside on shares.",
+                "reward":   "Premium collected. Reduces your cost basis.",
+                "avoid":    "If you think the stock is about to make a big move up — you'll miss it.",
+                "legs":     [{"type":"call","strike":K*1.05,"premium":mid_ex*0.4,"qty":1,"position":"short"}],
+            },
+        }
+
+        g = guides[strat_pick]
+        st.markdown(f"**When to use:** {g['when']}")
+        st.markdown(f"**Max risk:** {g['risk']}  |  **Max reward:** {g['reward']}")
+        st.markdown(f"**Avoid when:** {g['avoid']}")
+
+        pnl = payoff_df(S, g["legs"])
+        st.line_chart(pnl.set_index("Stock price"))
+        st.caption(f"Payoff at expiry. Spot = ${S:.2f}, strike = ${K:.2f}. Horizontal axis = stock price range.")
+
+        net = sum((l["premium"] if l["position"]=="long" else -l["premium"]) for l in g["legs"])
+        st.markdown(f"Net cost/credit: **${net:+.3f}** per share = **${net*100:+.2f}** per contract.")
+
+    # =======================================================================
+    elif lesson == "8. Position sizing and risk management":
+    # =======================================================================
+
+        st.markdown("""
+**The rule that determines whether you survive long enough to get good:**
+
+Never risk more than 2–5% of your total portfolio on a single options trade.
+
+Options can go to zero. That is not a tail risk — it is a normal outcome on losing trades.
+If you size correctly, a string of losses doesn't wipe you out.
+""")
+
+        nzdusd_l = fetch_nzdusd()
+        port_nzd = st.number_input("Your total trading portfolio (NZD)", 1000.0, 500000.0, 5000.0, 500.0)
+        risk_pct = st.slider("Max risk per trade (%)", 1, 10, 3)
+
+        max_risk_nzd  = port_nzd * risk_pct / 100
+        max_contracts = max(1, int(max_risk_nzd / (mid_ex * 100 / nzdusd_l)))
+
+        st.markdown(f"""
+**Portfolio:** NZD {port_nzd:,.0f}
+**Max risk per trade ({risk_pct}%):** NZD {max_risk_nzd:,.0f}
+**INTC ATM call costs:** NZD {mid_ex*100/nzdusd_l:,.0f} per contract (your max loss per contract)
+**Max contracts:** {max_contracts}
+""")
+
+        st.success(f"At {risk_pct}% risk, you can buy up to **{max_contracts} contract(s)** on INTC without breaking position sizing rules.")
+
+        st.markdown("""
+**Exit rules — set these before you enter:**
+
+| Situation | Action |
+|---|---|
+| Option gains 50–100% | Take profit — the math says taking 50% winners consistently beats holding for 100% |
+| Option loses 50% | Cut the loss — the remaining value rarely recovers, and theta keeps eroding it |
+| 7 days to expiry | Close or roll — gamma and theta are extreme in the final week |
+| The thesis is wrong | Exit immediately — don't hold hoping it reverses |
+
+**The discipline gap:** Most losses in options come from not following exit rules, not from picking the wrong direction.
+""")
+
+    # =======================================================================
+    elif lesson == "9. The most common mistakes":
+    # =======================================================================
+
+        st.markdown("These are the moves that cost most beginners their first account.")
+
+        mistakes = [
+            {
+                "title": "Buying far OTM weeklies",
+                "why":   "They look cheap. $50 for a contract feels like a lottery ticket. They expire worthless 80%+ of the time. "
+                         "The probability of a stock making a 15% move in 5 days is very low.",
+                "fix":   "Start with ATM options, 30–45 DTE. Delta 0.40–0.60. More expensive but far more likely to have value at expiry.",
+            },
+            {
+                "title": "Buying calls right before earnings",
+                "why":   "IV inflates before earnings. You overpay. Even if the stock moves your way, IV crush can erase the gain. "
+                         "See the IV crush lesson.",
+                "fix":   "Either enter before IV inflates (1–2 weeks before earnings), or use a spread to reduce vega risk.",
+            },
+            {
+                "title": "Ignoring theta on long holds",
+                "why":   "Buying a 30 DTE call and holding it for 25 days while the stock goes sideways. "
+                         "Theta has eaten most of your premium even though you were 'right' directionally.",
+                "fix":   "Options need to move quickly. If the stock isn't moving in 7–10 days, reassess. Don't hold hoping.",
+            },
+            {
+                "title": "No exit plan",
+                "why":   "Entering with no defined profit target or stop loss. Watching a 60% winner turn into a 30% loser.",
+                "fix":   "Set your exit levels before you enter: take 50–80% profit, cut at 50% loss. Use the position builder in the Options tab.",
+            },
+            {
+                "title": "Oversizing — putting too much into one trade",
+                "why":   "One bad trade wipes 30% of the account. Emotionally devastating. Leads to revenge trading.",
+                "fix":   "Lesson 8 covers this. Max 2–5% of portfolio per trade.",
+            },
+            {
+                "title": "Confusing 'cheap' with 'good value'",
+                "why":   "A $0.20 option is not cheap if it needs a 25% move to profit. Price means nothing without context.",
+                "fix":   "Always check the break-even price and the move needed. These are shown in the Chain & Position section.",
+            },
+        ]
+
+        for m in mistakes:
+            with st.expander(f"❌  {m['title']}"):
+                st.markdown(f"**Why it happens:** {m['why']}")
+                st.markdown(f"**Fix:** {m['fix']}")
+
+        st.divider()
+        st.markdown("""
+**The honest summary:**
+
+Options are not a shortcut to fast money. They are a tool. Used correctly — right sizing, right strategy for the IV environment, defined exits — they let you express a directional view with capped downside and leveraged upside.
+
+The screener tells you *what* to watch. The intraday scanner tells you *when* activity is building.
+Options let you act on that signal with less capital at risk than buying shares outright.
+
+That's the edge. Build it slowly.
+""")
