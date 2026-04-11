@@ -1,7 +1,10 @@
+import json
 import math
 import os
 import sqlite3
 from datetime import date, datetime
+
+from core.sec_edgar import get_recent_filings
 
 import numpy as np
 import pandas as pd
@@ -231,6 +234,143 @@ with st.sidebar:
 tab_screener, tab_tracker, tab_alerts, tab_backtest, tab_advice, tab_options, tab_learn = st.tabs(["Screener", "Trade Tracker", "Alerts", "Backtest", "Advice", "Options", "Learn"])
 
 
+# ---------------------------------------------------------------------------
+# Screener — opportunity detail dialog
+# ---------------------------------------------------------------------------
+
+@st.dialog("📊 Opportunity Details", width="large")
+def show_opportunity_detail(row: dict):
+    ticker = row["ticker"]
+
+    col1, col2, col3 = st.columns([2, 1, 1])
+    with col1:
+        st.subheader(ticker)
+        st.caption(row.get("strategy", ""))
+    with col2:
+        st.metric("TradeScore", f"{row.get('tradescore', 0) or 0:.0f}/100")
+    with col3:
+        st.metric("Conviction", row.get("conviction") or "—")
+
+    st.divider()
+
+    with st.expander("Score breakdown", expanded=True):
+        raw_explain = row.get("explain") or "{}"
+        try:
+            explain = json.loads(raw_explain) if isinstance(raw_explain, str) else raw_explain
+        except Exception:
+            explain = {}
+        components = explain.get("components", {})
+        if components:
+            positives = {k: v for k, v in components.items()
+                        if not k.startswith("penalty") and v > 0}
+            penalties = {k: v for k, v in components.items()
+                        if k.startswith("penalty") and v > 0}
+            if positives:
+                st.caption("**Signal contributions**")
+                for k, v in positives.items():
+                    st.progress(min(float(v), 1.0),
+                                text=f"{k.replace('_', ' ').title()}: {v:.2f}")
+            if penalties:
+                st.caption("**Penalties**")
+                for k, v in penalties.items():
+                    label = k.replace("penalty_", "").replace("_", " ").title()
+                    st.progress(min(float(v), 1.0),
+                                text=f"⚠️ {label}: -{v:.2f}")
+        else:
+            st.info("Run the screener to generate score breakdown.")
+
+    st.divider()
+
+    with st.expander("Trade setup", expanded=True):
+        direction = row.get("direction") or "—"
+        entry     = row.get("entry") or None
+        stop      = row.get("stop_loss") or None
+        target, rr = None, None
+        if entry and stop:
+            risk   = abs(entry - stop)
+            target = entry + 2.0 * risk if direction == "long" else entry - 2.0 * risk
+            rr     = 2.0
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Direction",
+                  "🟢 Long" if direction == "long" else
+                  "🔴 Short" if direction == "short" else "—")
+        c2.metric("Entry",  f"${entry:.2f}"  if entry  else "—")
+        c3.metric("Stop",   f"${stop:.2f}"   if stop   else "—")
+        c4.metric("Target", f"${target:.2f}" if target else "—")
+        if rr:
+            st.caption(f"Risk/Reward: {rr:.1f}:1  ·  "
+                      f"Rationale: {row.get('rationale', 'ATR-scaled stop')}")
+
+    st.divider()
+
+    with st.expander("Recent alerts", expanded=False):
+        try:
+            conn = get_conn()
+            alert_df = pd.read_sql_query(
+                "SELECT triggered_at, alert_type, value, price, rvol "
+                "FROM alerts WHERE ticker = ? ORDER BY triggered_at DESC LIMIT 5",
+                conn, params=(ticker,)
+            )
+            conn.close()
+            if not alert_df.empty:
+                st.dataframe(alert_df, hide_index=True, use_container_width=True)
+            else:
+                st.caption("No recent alerts for this ticker.")
+        except Exception as e:
+            st.caption(f"Could not load alerts: {e}")
+
+    with st.expander("📄 Recent SEC filings", expanded=False):
+        try:
+            filings = get_recent_filings(ticker)
+        except Exception:
+            filings = None
+        if filings is None:
+            st.caption("Could not load filings.")
+        elif filings:
+            for f in filings:
+                st.markdown(
+                    f"**{f['form']}** · {f['filed']} · "
+                    f"[{f.get('description', 'View filing')}]({f['url']})"
+                )
+        else:
+            st.caption("No recent filings found or not applicable "
+                       "(crypto assets have no SEC filings).")
+
+    st.markdown(
+        f"[View on Finviz](https://finviz.com/quote.ashx?t={ticker}) · "
+        f"[Yahoo Finance](https://finance.yahoo.com/quote/{ticker})"
+    )
+
+
+def pick_top_opportunities(df: pd.DataFrame, n: int = 7) -> pd.DataFrame:
+    """Select best trade candidates with sector diversity."""
+    required = {"ticker", "rvol", "price", "score"}
+    if not required.issubset(df.columns):
+        return pd.DataFrame()
+
+    filtered = df[
+        (df["rvol"] >= 1.8) &
+        (df["price"] >= 2.0) &
+        (df["score"] >= 2)
+    ].copy()
+
+    score_col = "tradescore" if "tradescore" in filtered.columns else "score"
+    filtered = filtered.sort_values(score_col, ascending=False)
+
+    picked = []
+    sector_counts: dict = {}
+    for _, row in filtered.iterrows():
+        sector = row.get("sector") or "Unknown"
+        if sector_counts.get(sector, 0) >= 2:
+            continue
+        picked.append(row)
+        sector_counts[sector] = sector_counts.get(sector, 0) + 1
+        if len(picked) >= n:
+            break
+
+    return pd.DataFrame(picked) if picked else pd.DataFrame()
+
+
 # ===========================================================================
 # TAB 1 — Screener
 # ===========================================================================
@@ -239,6 +379,57 @@ with tab_screener:
     if not dates or selected_date is None:
         st.info("No screener data yet. Run `python run.py` first.")
     else:
+        # ── Mode toggle ───────────────────────────────────────────
+        mode = st.segmented_control(
+            "View mode",
+            options=["Advanced", "Simple"],
+            default="Advanced",
+            label_visibility="collapsed",
+        )
+
+        # ── Top Opportunities ─────────────────────────────────────
+        st.markdown("### 🎯 Top Opportunities")
+        _all_conn = get_conn()
+        _all_df = pd.read_sql(
+            "SELECT * FROM results WHERE run_date = ?",
+            _all_conn, params=(selected_date,)
+        )
+        _all_conn.close()
+        top_df = pick_top_opportunities(_all_df)
+
+        if top_df.empty:
+            st.info("No high-conviction setups right now. "
+                    "Run the screener or adjust filters.")
+        else:
+            card_cols = st.columns(min(4, len(top_df)))
+            score_col = "tradescore" if "tradescore" in top_df.columns else "score"
+            for i, (_, opp) in enumerate(top_df.iterrows()):
+                # conviction lives inside the explain JSON blob
+                try:
+                    _ex = json.loads(opp.get("explain") or "{}")
+                    _conviction = _ex.get("conviction") or "—"
+                except Exception:
+                    _conviction = "—"
+                with card_cols[i % 4]:
+                    st.metric(
+                        label=f"**{opp['ticker']}**",
+                        value=f"{opp[score_col]:.0f}",
+                        delta=f"{opp['change_pct']:.2f}%",
+                    )
+                    st.caption(
+                        f"{_conviction}  ·  "
+                        f"RVOL {opp.get('rvol', 0):.1f}x  ·  "
+                        f"{opp.get('strategy', '')}"
+                    )
+                    if st.button("Details", key=f"opp_{opp['ticker']}_{i}"):
+                        show_opportunity_detail(opp.to_dict())
+
+        st.divider()
+
+        if mode == "Simple":
+            st.stop()
+
+        # ── existing filtered table ───────────────────────────────
         conn = get_conn()
         df = pd.read_sql(
             "SELECT * FROM results WHERE run_date = ?", conn, params=(selected_date,)

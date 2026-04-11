@@ -12,6 +12,8 @@ Cron example (9am ET, Mon-Fri):
     0 13 * * 1-5 cd /path/to/TradeStrategy && python run.py
 """
 
+import json
+import math
 import os
 import sqlite3
 from datetime import datetime, timezone
@@ -67,11 +69,18 @@ def init_db():
             score            INTEGER,
             market_cap       REAL,
             float_shares     REAL,
+            tradescore       REAL,
+            explain          TEXT,
             PRIMARY KEY (run_date, ticker)
         )
     """)
-    # Migrate existing DBs that pre-date the new columns
-    for col, col_type in [("market_cap", "REAL"), ("float_shares", "REAL")]:
+    # Migrate existing DBs that pre-date new columns
+    for col, col_type in [
+        ("market_cap",  "REAL"),
+        ("float_shares","REAL"),
+        ("tradescore",  "REAL"),
+        ("explain",     "TEXT"),
+    ]:
         try:
             conn.execute(f"ALTER TABLE results ADD COLUMN {col} {col_type}")
         except Exception:
@@ -86,7 +95,7 @@ def save_results(run_date: str, rows: list[dict]):
         conn.execute(
             """
             INSERT OR REPLACE INTO results VALUES
-            (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """,
             (
                 run_date, r["ticker"], r["strategy"], r["asset"],
@@ -96,6 +105,7 @@ def save_results(run_date: str, rows: list[dict]):
                 r["macd"], r["macd_signal"], r["vwap"],
                 r["volume_trend_up"], r["score"],
                 r.get("market_cap"), r.get("float_shares"),
+                r.get("tradescore"), r.get("explain"),
             ),
         )
     conn.commit()
@@ -153,6 +163,122 @@ def build_ticker_map() -> dict[str, str]:
             ticker_map.setdefault(ticker, strategy)
 
     return ticker_map
+
+
+# ---------------------------------------------------------------------------
+# TradeScore (0–100)
+# ---------------------------------------------------------------------------
+
+def _clamp(v: float, lo: float = 0.0, hi: float = 1.0) -> float:
+    return max(lo, min(hi, v))
+
+
+def compute_tradescore(row: dict) -> dict:
+    """
+    Returns {"score": float, "components": dict, "conviction": str}.
+
+    Weights
+    -------
+    RVOL          0.25  — volume confirmation
+    Change %      0.15  — price momentum
+    MACD          0.20  — trend direction and strength
+    EMA trend     0.20  — alignment across timeframes
+    RSI position  0.20  — momentum zone, not exhausted
+
+    Penalty: price extended > 1.8× ATR from VWAP reduces final score.
+    """
+    rvol       = float(row.get("rvol", 0))
+    change_pct = float(row.get("change_pct", 0))
+    macd       = float(row.get("macd", 0))
+    macd_sig   = float(row.get("macd_signal", 0))
+    ema9       = float(row.get("ema9", 0))
+    ema20      = float(row.get("ema20", 0))
+    ema200     = float(row.get("ema200", 0))
+    rsi_val    = float(row.get("rsi", 50))
+    atr_val    = float(row.get("atr", 0.01)) or 0.01
+    price      = float(row.get("price", 0))
+    vwap       = float(row.get("vwap", price)) or price
+    is_crypto  = str(row.get("ticker", "")).endswith("-USD")
+
+    # --- RVOL component ---
+    # 1× = normal, 5×+ = max. Scaled so 3× ≈ 0.70.
+    rvol_c = _clamp(rvol / 5.0)
+
+    # --- Change % component ---
+    # 0% = 0, 10%+ = 1.0. Negative change scores 0.
+    change_c = _clamp(max(change_pct, 0) / 10.0)
+
+    # --- MACD component ---
+    # Normalise MACD diff relative to ATR so large-cap vs small-cap is comparable.
+    macd_diff = macd - macd_sig
+    macd_norm = macd_diff / atr_val
+    # Maps: +0.05 → 1.0, 0 → 0.5, -0.05 → 0.0
+    macd_c = _clamp((macd_norm + 0.05) / 0.10)
+
+    # --- EMA trend component ---
+    if is_crypto:
+        ema_c = 1.0 if ema9 > ema20 else 0.0
+    else:
+        if ema9 > ema20 > ema200:
+            ema_c = 1.0
+        elif ema9 > ema20:
+            ema_c = 0.5
+        else:
+            ema_c = 0.0
+
+    # --- RSI position component ---
+    # Peak at 55 (momentum zone). Penalises overbought/oversold extremes.
+    if 45 <= rsi_val <= 65:
+        rsi_c = 1.0
+    elif 35 <= rsi_val <= 75:
+        rsi_c = 0.7
+    elif 30 <= rsi_val <= 80:
+        rsi_c = 0.4
+    else:
+        rsi_c = 0.1
+
+    # --- Raw weighted score ---
+    raw = (
+        rvol_c   * 0.25
+        + change_c * 0.15
+        + macd_c   * 0.20
+        + ema_c    * 0.20
+        + rsi_c    * 0.20
+    )
+
+    # --- Extension penalty ---
+    # Price > 1.8 ATR from VWAP = chasing. Penalise up to 30%.
+    distance_atr = abs(price - vwap) / atr_val if atr_val else 0
+    if distance_atr > 1.8:
+        penalty = _clamp((distance_atr - 1.8) / 2.0, 0.0, 0.30)
+    else:
+        penalty = 0.0
+
+    final_score = round(raw * (1 - penalty) * 100, 1)
+
+    return {
+        "score": final_score,
+        "components": {
+            "rvol":              round(rvol_c, 3),
+            "change_pct":        round(change_c, 3),
+            "momentum_macd":     round(macd_c, 3),
+            "ema_trend":         round(ema_c, 3),
+            "rsi_position":      round(rsi_c, 3),
+            "penalty_extension": round(penalty, 3),
+        },
+        "conviction": conviction_label(final_score),
+    }
+
+
+def conviction_label(score: float) -> str:
+    if score >= 72:
+        return "High conviction"
+    elif score >= 52:
+        return "Strong setup"
+    elif score >= 35:
+        return "Watchlist"
+    else:
+        return "Avoid"
 
 
 # ---------------------------------------------------------------------------
@@ -264,7 +390,7 @@ def screen_ticker(ticker: str, strategy: str) -> dict | None:
         ])
         stop_loss = round(price - 1.5 * atr_val, 2)
 
-    return {
+    row = {
         "ticker":          ticker,
         "strategy":        strategy,
         "asset":           "crypto" if is_crypto else "equity",
@@ -285,6 +411,11 @@ def screen_ticker(ticker: str, strategy: str) -> dict | None:
         "market_cap":      market_cap,
         "float_shares":    float_shares,
     }
+
+    ts = compute_tradescore(row)
+    row["tradescore"] = ts["score"]
+    row["explain"]    = json.dumps(ts)
+    return row
 
 
 # ---------------------------------------------------------------------------
@@ -307,7 +438,9 @@ def main():
                     f"  PASS [{strategy:8}] {ticker:10} "
                     f"{result['change_pct']:+.1f}%  "
                     f"RVOL {result['rvol']:.1f}  "
-                    f"Score {result['score']}/4"
+                    f"Score {result['score']}/4  "
+                    f"TradeScore {result['tradescore']:.0f}  "
+                    f"[{result.get('explain') and json.loads(result['explain'])['conviction']}]"
                 )
         except Exception as e:
             print(f"  ERR  {ticker}: {e}")
@@ -315,6 +448,21 @@ def main():
     if results:
         save_results(run_date, results)
         print(f"\n{len(results)} candidates saved to screener.db")
+
+        # Top 5 by TradeScore
+        top5 = sorted(results, key=lambda r: r["tradescore"], reverse=True)[:5]
+        print("\nTop 5 by TradeScore:")
+        print(f"  {'Ticker':<10} {'TradeScore':>10} {'Conviction':<18} {'RVOL':>6} {'Change':>8} {'RSI':>6}")
+        print("  " + "-" * 66)
+        for r in top5:
+            ts_data = json.loads(r["explain"])
+            print(
+                f"  {r['ticker']:<10} {r['tradescore']:>10.1f} "
+                f"{ts_data['conviction']:<18} "
+                f"{r['rvol']:>6.1f}x "
+                f"{r['change_pct']:>+7.1f}% "
+                f"{r['rsi']:>6.1f}"
+            )
     else:
         print("\nNo candidates found today.")
 
