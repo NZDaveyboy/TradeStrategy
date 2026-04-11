@@ -5,3 +5,4 @@ __pycache__/
 screener.db
 logs/
 .DS_Store
+alerts.csv
