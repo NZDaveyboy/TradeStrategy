@@ -74,6 +74,7 @@ def init_db():
             setup_type       TEXT,
             rationale        TEXT,
             change_5d        REAL,
+            direction        TEXT,
             PRIMARY KEY (run_date, ticker)
         )
     """)
@@ -86,6 +87,7 @@ def init_db():
         ("setup_type",  "TEXT"),
         ("rationale",   "TEXT"),
         ("change_5d",   "REAL"),
+        ("direction",   "TEXT"),
     ]:
         try:
             conn.execute(f"ALTER TABLE results ADD COLUMN {col} {col_type}")
@@ -101,7 +103,7 @@ def save_results(run_date: str, rows: list[dict]):
         conn.execute(
             """
             INSERT OR REPLACE INTO results VALUES
-            (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """,
             (
                 run_date, r["ticker"], r["strategy"], r["asset"],
@@ -112,7 +114,8 @@ def save_results(run_date: str, rows: list[dict]):
                 r["volume_trend_up"], r["score"],
                 r.get("market_cap"), r.get("float_shares"),
                 r.get("tradescore"), r.get("explain"),
-                r.get("setup_type"), r.get("rationale"), r.get("change_5d"),
+                r.get("setup_type"), r.get("rationale"),
+                r.get("change_5d"), r.get("direction"),
             ),
         )
     conn.commit()
@@ -420,8 +423,20 @@ def _news_catalyst_score(_row: dict) -> tuple[float, dict]:
     return 0.0, {"note": "stub — no news source connected"}
 
 
+_BEARISH_LABELS = {
+    "Overextended":        "Extended downside move",
+    "Strong but extended": "Strong downside setup",
+    "Early breakout":      "Bearish breakdown",
+    "Emerging momentum":   "Emerging weakness",
+    "Momentum watchlist":  "Bearish watchlist",
+    "Avoid":               "Avoid",
+    "Low quality / illiquid": "Low quality / illiquid",
+}
+
+
 def _setup_type(ms: float, ee: float, er: float, lq: float,
-                rsi: float, change_5d: float, change_pct: float = 0.0) -> str:
+                rsi: float, change_5d: float,
+                change_pct: float = 0.0, direction: str = "long") -> str:
     """
     Derive a human label from sub-score geometry.
     Order matters — stronger disqualifiers checked first.
@@ -430,26 +445,31 @@ def _setup_type(ms: float, ee: float, er: float, lq: float,
     extended regardless of what ER scores, because the 1-year cumulative
     VWAP used in ER can understate intraday extension for recently beaten-
     down stocks.
+
+    direction: "long" | "short" | "neutral" — bearish setups get bearish labels.
     """
     if lq <= 3:
-        return "Low quality / illiquid"
-    if er >= 15:
-        return "Overextended"
-    # Hard gate: large single-day move = extended by definition
-    if change_pct >= 15.0 and ms >= 10:
-        return "Strong but extended"
-    # Normal ER gate — checked before Emerging momentum
-    if ms >= 13 and er >= 8:
-        return "Strong but extended"
-    if ms >= 17 and ee >= 15 and er <= 7:
-        return "Early breakout"
-    if ms >= 13 and ee >= 11 and er <= 9:
-        return "Emerging momentum"
-    if (ms + ee - er) >= 20:
-        return "Emerging momentum"
-    if (ms + ee - er) >= 10:
-        return "Momentum watchlist"
-    return "Avoid"
+        label = "Low quality / illiquid"
+    elif er >= 15:
+        label = "Overextended"
+    elif abs(change_pct) >= 15.0 and ms >= 10:
+        label = "Strong but extended"
+    elif ms >= 13 and er >= 8:
+        label = "Strong but extended"
+    elif ms >= 17 and ee >= 15 and er <= 7:
+        label = "Early breakout"
+    elif ms >= 13 and ee >= 11 and er <= 9:
+        label = "Emerging momentum"
+    elif (ms + ee - er) >= 20:
+        label = "Emerging momentum"
+    elif (ms + ee - er) >= 10:
+        label = "Momentum watchlist"
+    else:
+        label = "Avoid"
+
+    if direction == "short":
+        return _BEARISH_LABELS.get(label, label)
+    return label
 
 
 def _build_rationale(row: dict, ms: float, ee: float, er: float,
@@ -514,8 +534,22 @@ def compute_tradescore(
         change_5d = round((float(close.iloc[-1]) / float(close.iloc[-6]) - 1) * 100, 2)
 
     change_pct = float(row.get("change_pct", 0))
+
+    # Direction: long when price above VWAP and short-term EMA above medium-term.
+    price = float(row.get("price", 0))
+    vwap  = float(row.get("vwap", price)) or price
+    ema9  = float(row.get("ema9",  price)) or price
+    ema20 = float(row.get("ema20", price)) or price
+    if price > vwap and ema9 >= ema20:
+        direction = "long"
+    elif price < vwap and ema9 <= ema20:
+        direction = "short"
+    else:
+        direction = "neutral"
+
     setup     = _setup_type(ms_val, ee_val, er_val, lq_val,
-                            float(row.get("rsi", 50)), change_5d, change_pct)
+                            float(row.get("rsi", 50)), change_5d,
+                            change_pct, direction)
     rationale = _build_rationale(row, ms_val, ee_val, er_val, setup, change_5d)
 
     return {
@@ -525,10 +559,11 @@ def compute_tradescore(
         "extension_risk":  er_val,
         "liquidity":       lq_val,
         "news_catalyst":   nc_val,
+        "direction":       direction,
         "setup_type":      setup,
         "rationale":       rationale,
         "change_5d":       change_5d,
-        "conviction":      setup,          # conviction = setup_type label
+        "conviction":      setup,
         "components": {
             "momentum":    ms_det,
             "early_entry": ee_det,
@@ -696,6 +731,7 @@ def screen_ticker(ticker: str, strategy: str) -> dict | None:
     row["setup_type"] = ts["setup_type"]
     row["rationale"]  = ts["rationale"]
     row["change_5d"]  = ts["change_5d"]
+    row["direction"]  = ts["direction"]
     row["explain"]    = json.dumps(ts)
     return row
 
@@ -753,6 +789,13 @@ def main():
             print(f"    → {ts_data['rationale']}")
     else:
         print("\nNo candidates found today.")
+
+    # Send structured daily brief via Telegram
+    try:
+        from send_brief import send_daily_brief
+        send_daily_brief(run_date)
+    except Exception as e:
+        print(f"\nDaily brief failed (non-fatal): {e}")
 
 
 if __name__ == "__main__":

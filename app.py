@@ -311,11 +311,6 @@ def show_opportunity_detail(row: dict):
     st.divider()
 
     with st.expander("Trade setup", expanded=True):
-        # Debug: print row keys to terminal so we can verify what's available
-        print(f"[dialog] {ticker} row keys: {sorted(row.keys())}")
-        print(f"[dialog] {ticker} price={row.get('price')} vwap={row.get('vwap')} "
-              f"ema9={row.get('ema9')} ema20={row.get('ema20')} atr={row.get('atr')}")
-
         # compute_trade_setup uses price/vwap/ema9/ema20/atr/day_high/day_low
         # day_high/day_low aren't stored in DB — use price as fallback so setup
         # still produces a direction; entry will be slightly off but close enough
@@ -332,8 +327,7 @@ def show_opportunity_detail(row: dict):
             target    = setup.target    if setup.direction != "neutral" else None
             rr        = setup.rr        if setup.direction != "neutral" else None
             rat       = setup.rationale
-        except Exception as e:
-            print(f"[dialog] compute_trade_setup error: {e}")
+        except Exception:
             direction, entry, stop, target, rr = "—", None, row.get("stop_loss"), None, None
             rat = ""
 
@@ -388,8 +382,12 @@ def show_opportunity_detail(row: dict):
     )
 
 
-def pick_top_opportunities(df: pd.DataFrame, n: int = 7) -> pd.DataFrame:
-    """Select best trade candidates with sector diversity."""
+def pick_top_opportunities(df: pd.DataFrame, n: int = 7,
+                           direction: str = "long") -> pd.DataFrame:
+    """
+    Select best trade candidates with sector diversity.
+    direction: "long" | "short" | "both"
+    """
     required = {"ticker", "rvol", "price", "score"}
     if not required.issubset(df.columns):
         return pd.DataFrame()
@@ -399,6 +397,10 @@ def pick_top_opportunities(df: pd.DataFrame, n: int = 7) -> pd.DataFrame:
         (df["price"] >= 2.0) &
         (df["score"] >= 2)
     ].copy()
+
+    # Filter by direction if the column exists
+    if direction != "both" and "direction" in filtered.columns:
+        filtered = filtered[filtered["direction"] == direction]
 
     score_col = "tradescore" if "tradescore" in filtered.columns else "score"
     filtered = filtered.sort_values(score_col, ascending=False)
@@ -434,28 +436,39 @@ with tab_screener:
         )
 
         # ── Top Opportunities ─────────────────────────────────────
-        st.markdown("### 🎯 Top Opportunities")
+        _opp_col1, _opp_col2 = st.columns([3, 1])
+        with _opp_col1:
+            st.markdown("### 🎯 Top Opportunities")
+        with _opp_col2:
+            dir_filter = st.segmented_control(
+                "Direction filter",
+                options=["Long", "Short", "Both"],
+                default="Long",
+                label_visibility="collapsed",
+                key="dir_filter",
+            )
+
         _all_conn = get_conn()
         _all_df = pd.read_sql(
             "SELECT * FROM results WHERE run_date = ?",
             _all_conn, params=(selected_date,)
         )
         _all_conn.close()
-        top_df = pick_top_opportunities(_all_df)
 
-        if top_df.empty:
-            st.info("No high-conviction setups right now. "
-                    "Run the screener or adjust filters.")
-        else:
-            card_cols = st.columns(min(4, len(top_df)))
-            score_col = "tradescore" if "tradescore" in top_df.columns else "score"
-            for i, (_, opp) in enumerate(top_df.iterrows()):
-                # conviction lives inside the explain JSON blob
+        _dir_arg = dir_filter.lower() if dir_filter else "long"
+        top_df = pick_top_opportunities(_all_df, direction=_dir_arg)
+
+        def _render_opp_cards(cards_df: pd.DataFrame, key_prefix: str):
+            if cards_df.empty:
+                return False
+            card_cols = st.columns(min(4, len(cards_df)))
+            score_col = "tradescore" if "tradescore" in cards_df.columns else "score"
+            for i, (_, opp) in enumerate(cards_df.iterrows()):
                 try:
                     _ex = json.loads(opp.get("explain") or "{}")
-                    _conviction = _ex.get("conviction") or "—"
+                    _conviction = _ex.get("conviction") or opp.get("setup_type") or "—"
                 except Exception:
-                    _conviction = "—"
+                    _conviction = opp.get("setup_type") or "—"
                 with card_cols[i % 4]:
                     st.metric(
                         label=f"**{opp['ticker']}**",
@@ -467,8 +480,28 @@ with tab_screener:
                         f"RVOL {opp.get('rvol', 0):.1f}x  ·  "
                         f"{opp.get('strategy', '')}"
                     )
-                    if st.button("Details", key=f"opp_{opp['ticker']}_{i}"):
+                    if st.button("Details", key=f"{key_prefix}_{opp['ticker']}_{i}"):
                         show_opportunity_detail(opp.to_dict())
+            return True
+
+        if top_df.empty:
+            st.info("No setups match the current direction filter. "
+                    "Run the screener or switch to Both.")
+        elif _dir_arg == "both":
+            long_df  = top_df[top_df.get("direction", pd.Series(dtype=str)) == "long"] \
+                       if "direction" in top_df.columns else top_df
+            short_df = top_df[top_df.get("direction", pd.Series(dtype=str)) == "short"] \
+                       if "direction" in top_df.columns else pd.DataFrame()
+            if not long_df.empty:
+                st.caption("🟢 Long setups")
+                _render_opp_cards(long_df, "opp_l")
+            if not short_df.empty:
+                st.caption("🔴 Short / bearish setups")
+                _render_opp_cards(short_df, "opp_s")
+            if long_df.empty and short_df.empty:
+                _render_opp_cards(top_df, "opp")
+        else:
+            _render_opp_cards(top_df, "opp")
 
         st.divider()
 

@@ -73,7 +73,7 @@ def compute_trade_setup(row: dict) -> TradeSetup:
                 target=price, rr=0.0,
                 rationale="Entry would be at or above stop — no valid setup.",
             )
-        target = round(entry - 2.0 * (stop - entry), 4)
+        target = round(max(0.01, entry - 2.0 * (stop - entry)), 4)
         rr     = round((entry - target) / (stop - entry), 2)
         rationale = (
             f"{conviction} short. Price ${price:.2f} below VWAP ${vwap:.2f} "
