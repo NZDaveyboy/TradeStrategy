@@ -76,6 +76,24 @@ init_tracker_tables()
 # Price fetching (cached 5 min)
 # ---------------------------------------------------------------------------
 
+@st.cache_data(ttl=86400)
+def get_company_info(ticker: str) -> dict:
+    """Returns basic company description from yfinance. Cached 24h."""
+    if ticker.endswith("-USD"):
+        return {}
+    try:
+        info = yf.Ticker(ticker).info
+        return {
+            "name":    info.get("longName") or info.get("shortName") or ticker,
+            "sector":  info.get("sector") or "",
+            "industry":info.get("industry") or "",
+            "summary": info.get("longBusinessSummary") or "",
+            "website": info.get("website") or "",
+        }
+    except Exception:
+        return {}
+
+
 @st.cache_data(ttl=300)
 def fetch_nzdusd() -> float:
     try:
@@ -1278,6 +1296,24 @@ with tab_advice:
                             use_container_width=True, hide_index=True,
                         )
 
+                    with st.expander(f"About {ticker}"):
+                        co = get_company_info(ticker)
+                        if co:
+                            st.markdown(f"**{co['name']}**")
+                            if co["sector"] or co["industry"]:
+                                st.caption(f"{co['sector']}  ·  {co['industry']}")
+                            if co["summary"]:
+                                # Trim to first 3 sentences
+                                sentences = co["summary"].split(". ")
+                                brief = ". ".join(sentences[:3]).strip()
+                                if not brief.endswith("."):
+                                    brief += "."
+                                st.markdown(brief)
+                            if co["website"]:
+                                st.markdown(co["website"])
+                        else:
+                            st.caption("No company data available.")
+
         st.divider()
 
         # -----------------------------------------------------------------------
@@ -1433,7 +1469,7 @@ with tab_options:
 
     opt_sub = st.radio(
         "Section",
-        ["Chain & Position", "Strategy Builder", "Backtest"],
+        ["Recommendations", "Chain & Position", "Strategy Builder", "Backtest"],
         horizontal=True,
     )
 
@@ -1459,10 +1495,213 @@ with tab_options:
     st.divider()
 
     # =======================================================================
+    # SECTION R — Recommendations
+    # =======================================================================
+
+    if opt_sub == "Recommendations":
+
+        if not opt_ticker:
+            st.info("Enter a ticker above to get an options strategy recommendation.")
+        else:
+            try:
+                # Screener context for this ticker
+                screener_row = None
+                if dates:
+                    conn = get_conn()
+                    _sq = pd.read_sql(
+                        "SELECT * FROM results WHERE run_date=? AND ticker=? LIMIT 1",
+                        conn, params=(dates[0], opt_ticker),
+                    )
+                    conn.close()
+                    screener_row = _sq.iloc[0].to_dict() if not _sq.empty else None
+
+                tk       = yf.Ticker(opt_ticker)
+                spot     = float(tk.fast_info.get("last_price") or 0)
+                expiries = tk.options
+                rv30     = get_rv30(opt_ticker)
+
+                if not expiries or not spot:
+                    st.warning(f"No options data available for {opt_ticker}.")
+                else:
+                    # Best 30–45 DTE expiry
+                    today_dt = datetime.utcnow().date()
+                    best_exp, best_dte = None, None
+                    for _e in expiries:
+                        _dte = (datetime.strptime(_e, "%Y-%m-%d").date() - today_dt).days
+                        if 25 <= _dte <= 55:
+                            best_exp, best_dte = _e, _dte
+                            break
+                    if not best_exp:
+                        best_exp = min(expiries, key=lambda _e: abs((datetime.strptime(_e, "%Y-%m-%d").date() - today_dt).days - 35))
+                        best_dte = (datetime.strptime(best_exp, "%Y-%m-%d").date() - today_dt).days
+
+                    calls_raw, puts_raw, _ = get_chain(opt_ticker, best_exp)
+
+                    # ATM IV
+                    _atm_rows = calls_raw[calls_raw["strike"].between(spot*0.95, spot*1.05) & (calls_raw["impliedVolatility"] > 0)]
+                    atm_iv = float(_atm_rows["impliedVolatility"].mean()) if not _atm_rows.empty else (rv30 or 0.30)
+
+                    direction  = screener_row.get("direction")  if screener_row else None
+                    setup_type = screener_row.get("setup_type") if screener_row else None
+                    tradescore = float(screener_row.get("tradescore") or 0) if screener_row else None
+
+                    iv_expensive = bool(rv30 and atm_iv > rv30 * 1.3)
+                    iv_cheap     = bool(rv30 and atm_iv < rv30 * 0.85)
+
+                    # Strategy selection
+                    if direction == "long":
+                        rec_strat = "Bull Call Spread" if iv_expensive else "Long Call"
+                        rec_bias  = "Bullish"
+                        if iv_expensive:
+                            iv_note = f"IV {atm_iv*100:.0f}% is elevated vs 30d RV {rv30*100:.0f}% — spread reduces vega exposure and cuts premium cost."
+                        elif iv_cheap:
+                            iv_note = f"IV {atm_iv*100:.0f}% is below 30d RV {rv30*100:.0f}% — options are cheap, outright call is the better play."
+                        else:
+                            iv_note = f"IV {atm_iv*100:.0f}% is fair vs 30d RV {rv30*100:.0f}% — outright call is fine."
+                    elif direction == "short":
+                        rec_strat = "Bear Put Spread" if iv_expensive else "Long Put"
+                        rec_bias  = "Bearish"
+                        if iv_expensive:
+                            iv_note = f"IV {atm_iv*100:.0f}% elevated vs RV {rv30*100:.0f}% — spread reduces cost vs outright put."
+                        else:
+                            iv_note = f"IV {atm_iv*100:.0f}% fair/cheap vs RV {rv30*100:.0f}% — outright put captures full downside."
+                    elif setup_type in {"Strong but extended", "Overextended", "Extended downside move", "Strong downside setup"}:
+                        rec_strat = "Cash-Secured Put"
+                        rec_bias  = "Neutral / Pullback entry"
+                        iv_note   = (
+                            f"IV {atm_iv*100:.0f}% is elevated — good for premium collection."
+                            if iv_expensive else
+                            f"IV {atm_iv*100:.0f}% is fair."
+                        )
+                    else:
+                        rec_strat = None
+                        rec_bias  = None
+                        iv_note   = f"IV {atm_iv*100:.0f}%  |  30d RV {rv30*100:.0f}%" if rv30 else f"IV {atm_iv*100:.0f}%"
+
+                    # Context metrics
+                    if screener_row:
+                        _sc1, _sc2, _sc3, _sc4 = st.columns(4)
+                        _sc1.metric("Spot",       f"${spot:.2f}")
+                        _sc2.metric("TradeScore", f"{tradescore:.0f}" if tradescore else "—")
+                        _sc3.metric("Setup",      setup_type or "—")
+                        _sc4.metric("Direction",  "🟢 Long" if direction == "long" else "🔴 Short" if direction == "short" else direction or "—")
+                    else:
+                        _sc1, _sc2 = st.columns(2)
+                        _sc1.metric("Spot",   f"${spot:.2f}")
+                        _sc2.metric("30d RV", f"{rv30*100:.1f}%" if rv30 else "—")
+                        st.caption(f"{opt_ticker} not in today's screener — showing live options data only.")
+
+                    st.divider()
+
+                    if not rec_strat:
+                        st.warning("No clear directional signal from the screener. Enter a ticker that has a long or short setup.")
+                    else:
+                        call_strikes = sorted(calls_raw[calls_raw["bid"] > 0]["strike"].tolist())
+                        put_strikes  = sorted(puts_raw[puts_raw["bid"] > 0]["strike"].tolist(), reverse=True)
+
+                        atm_call_k = min(call_strikes, key=lambda k: abs(k - spot)) if call_strikes else spot
+                        atm_put_k  = min(put_strikes,  key=lambda k: abs(k - spot)) if put_strikes  else spot
+                        otm_call_k = min(call_strikes, key=lambda k: abs(k - spot*1.05)) if call_strikes else round(spot*1.05, 2)
+                        otm_put_k  = min(put_strikes,  key=lambda k: abs(k - spot*0.95)) if put_strikes  else round(spot*0.95, 2)
+
+                        def _mid(df, strike):
+                            r = df[df["strike"] == strike]
+                            if r.empty:
+                                return 0.0
+                            _r = r.iloc[0]
+                            b, a = float(_r.get("bid", 0) or 0), float(_r.get("ask", 0) or 0)
+                            return round((b + a) / 2 if a > 0 else float(_r.get("lastPrice", 0) or 0), 3)
+
+                        nzdusd_r = fetch_nzdusd()
+                        T_exp = best_dte / 365.0
+
+                        if rec_strat == "Long Call":
+                            k1, prem1 = atm_call_k, _mid(calls_raw, atm_call_k)
+                            legs = [{"type":"call","strike":k1,"premium":prem1,"qty":1,"position":"long"}]
+                            net, max_loss, max_profit = prem1, round(prem1*100,2), "Unlimited"
+                            be_price = round(k1 + prem1, 2)
+                            strike_desc = f"Strike ${k1:.2f} (ATM call)"
+
+                        elif rec_strat == "Bull Call Spread":
+                            k1, k2 = atm_call_k, otm_call_k
+                            p1, p2 = _mid(calls_raw, k1), _mid(calls_raw, k2)
+                            net = round(p1 - p2, 3)
+                            legs = [
+                                {"type":"call","strike":k1,"premium":p1,"qty":1,"position":"long"},
+                                {"type":"call","strike":k2,"premium":p2,"qty":1,"position":"short"},
+                            ]
+                            max_loss   = round(net * 100, 2)
+                            max_profit = round(((k2 - k1) - net) * 100, 2)
+                            be_price   = round(k1 + net, 2)
+                            strike_desc = f"Buy ${k1:.2f} / Sell ${k2:.2f} call"
+
+                        elif rec_strat == "Long Put":
+                            k1, prem1 = atm_put_k, _mid(puts_raw, atm_put_k)
+                            legs = [{"type":"put","strike":k1,"premium":prem1,"qty":1,"position":"long"}]
+                            net, max_loss, max_profit = prem1, round(prem1*100,2), round((k1-prem1)*100,2)
+                            be_price = round(k1 - prem1, 2)
+                            strike_desc = f"Strike ${k1:.2f} (ATM put)"
+
+                        elif rec_strat == "Bear Put Spread":
+                            k1, k2 = atm_put_k, otm_put_k
+                            p1, p2 = _mid(puts_raw, k1), _mid(puts_raw, k2)
+                            net = round(p1 - p2, 3)
+                            legs = [
+                                {"type":"put","strike":k1,"premium":p1,"qty":1,"position":"long"},
+                                {"type":"put","strike":k2,"premium":p2,"qty":1,"position":"short"},
+                            ]
+                            max_loss   = round(net * 100, 2)
+                            max_profit = round(((k1 - k2) - net) * 100, 2)
+                            be_price   = round(k1 - net, 2)
+                            strike_desc = f"Buy ${k1:.2f} / Sell ${k2:.2f} put"
+
+                        else:  # Cash-Secured Put
+                            k1, prem1 = otm_put_k, _mid(puts_raw, otm_put_k)
+                            legs = [{"type":"put","strike":k1,"premium":prem1,"qty":1,"position":"short"}]
+                            net        = -prem1
+                            max_loss   = round((k1 - prem1) * 100, 2)
+                            max_profit = round(prem1 * 100, 2)
+                            be_price   = round(k1 - prem1, 2)
+                            strike_desc = f"Sell ${k1:.2f} put (~5% OTM)"
+
+                        move_needed = abs(be_price - spot) / spot * 100
+                        cost_nzd    = abs(net) * 100 / (nzdusd_r or 0.57)
+
+                        st.subheader(f"Recommended: {rec_strat}")
+                        st.caption(f"{rec_bias}  ·  {opt_ticker}  ·  Expiry {best_exp} ({best_dte}d)  ·  {strike_desc}")
+                        st.info(iv_note)
+
+                        _rm1, _rm2, _rm3, _rm4 = st.columns(4)
+                        _rm1.metric("Net cost",    f"${abs(net):.3f}/share")
+                        _rm2.metric("Total NZD",   f"NZD {cost_nzd:,.0f}", help="Max loss if option expires worthless")
+                        _rm3.metric("Break-even",  f"${be_price:.2f}", delta=f"{((be_price/spot-1)*100):+.1f}% from spot")
+                        _rm4.metric("Move needed", f"{move_needed:.1f}%")
+
+                        _mc1, _mc2 = st.columns(2)
+                        _mc1.metric("Max loss",   f"NZD {max_loss/(nzdusd_r or 0.57):,.0f}" if isinstance(max_loss, (int,float)) else str(max_loss))
+                        _mc2.metric("Max profit", f"NZD {max_profit/(nzdusd_r or 0.57):,.0f}" if isinstance(max_profit, (int,float)) else str(max_profit))
+
+                        _iv_g = atm_iv or 0.30
+                        _g = bs_greeks(spot, legs[0]["strike"], T_exp, RISK_FREE, _iv_g, legs[0]["type"])
+                        st.markdown(
+                            f"Delta {_g['delta']:+.3f}  ·  moves ~${abs(_g['delta'])*100:.0f} per $1 stock move.  "
+                            f"Theta {_g['theta']:.4f}  ·  costs ~NZD {abs(_g['theta'])*100/(nzdusd_r or 0.57):.2f}/day.  "
+                            f"IV {atm_iv*100:.0f}%  ·  {best_dte}d to expiry."
+                        )
+
+                        st.subheader("Payoff at expiry")
+                        _pnl = payoff_df(spot, legs)
+                        st.line_chart(_pnl.set_index("Stock price"))
+                        st.caption("P&L per share at expiry. Multiply by 100 × contracts for total.")
+
+            except Exception as _e:
+                st.error(f"Could not generate recommendation for {opt_ticker}: {_e}")
+
+    # =======================================================================
     # SECTION A — Chain & Position
     # =======================================================================
 
-    if opt_sub == "Chain & Position":
+    elif opt_sub == "Chain & Position":
 
         if not opt_ticker:
             st.info("Enter a ticker to load its options chain.")
