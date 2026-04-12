@@ -1138,6 +1138,67 @@ with tab_advice:
     # Helpers
     # -----------------------------------------------------------------------
 
+    def options_rec(row: pd.Series) -> str:
+        """Plain-English options recommendation from screener data alone."""
+        direction  = str(row.get("direction") or "")
+        setup_type = str(row.get("setup_type") or "")
+        price      = float(row.get("price") or 0)
+        atr        = float(row.get("atr") or price * 0.02)
+        vwap       = float(row.get("vwap") or price)
+        ema20      = float(row.get("ema20") or price)
+        ticker     = str(row.get("ticker") or "")
+
+        if ticker.endswith("-USD"):
+            return "_Options are not available for crypto — use directional position sizing above._"
+
+        if direction == "long":
+            entry  = round(price * 1.001, 2)
+            stop   = round(min(vwap, ema20) - 0.35 * atr, 2)
+            target = round(entry + 2 * (entry - stop), 2)
+            return "\n".join([
+                "**Bullish — Long Call or Bull Call Spread**",
+                "",
+                f"- **Strategy:** Long Call when IV is fair/low. Bull Call Spread when IV is elevated (check IV vs 30d RV on the Options tab).",
+                f"- **Expiry:** 30–45 DTE",
+                f"- **Strike:** ATM near ${entry:.2f} (breakout entry zone). Target delta ~0.50.",
+                f"- **Exit thesis invalidated:** below ${stop:.2f} (VWAP/EMA20 support). Close the option.",
+                f"- **Profit target:** ${target:.2f} (2R). Take 50–80% profit — don't hold to expiry.",
+                "",
+                "_Options tab → Recommendations for exact contract pricing._",
+            ])
+
+        elif direction == "short":
+            entry  = round(price * 0.999, 2)
+            stop   = round(max(vwap, ema20) + 0.35 * atr, 2)
+            target = round(max(0.01, entry - 2 * (stop - entry)), 2)
+            return "\n".join([
+                "**Bearish — Long Put or Bear Put Spread**",
+                "",
+                f"- **Strategy:** Long Put when IV is fair/low. Bear Put Spread when IV is elevated.",
+                f"- **Expiry:** 30–45 DTE",
+                f"- **Strike:** ATM near ${entry:.2f} (breakdown entry zone). Target delta ~−0.50.",
+                f"- **Exit thesis invalidated:** above ${stop:.2f} (VWAP/EMA20 resistance). Close the option.",
+                f"- **Profit target:** ${target:.2f} (2R). Take 50–80% profit before expiry.",
+                "",
+                "_Options tab → Recommendations for exact contract pricing._",
+            ])
+
+        elif setup_type in {"Strong but extended", "Overextended", "Extended downside move", "Strong downside setup"}:
+            pullback   = round(max(vwap, ema20), 2)
+            csp_strike = round(price * 0.93, 2)
+            return "\n".join([
+                "**Extended move — Cash-Secured Put (pullback entry)**",
+                "",
+                f"- **Strategy:** Sell an OTM put to collect premium or get long on a pullback at a discount.",
+                f"- **Strike:** Around ${csp_strike:.2f} (~7% below spot, near support).",
+                f"- **Expiry:** 20–30 DTE. Close at 50% profit rather than holding to expiry.",
+                f"- **Pullback watch zone:** ${pullback:.2f} (VWAP/EMA20). If price returns here, reassess for a directional entry.",
+                "",
+                "_Options tab → Recommendations for exact contract pricing._",
+            ])
+
+        return "_No clear directional setup — wait for a better signal before trading options._"
+
     def signal_reasons(row: pd.Series) -> list[str]:
         """Plain-English reasons why this stock scored what it scored."""
         reasons = []
@@ -1286,6 +1347,9 @@ with tab_advice:
 
                     st.markdown("**Position size:**")
                     st.markdown(sizing_advice(row, risk_nzd, nzdusd))
+
+                    with st.expander("Options recommendation"):
+                        st.markdown(options_rec(row))
 
                     with st.expander("Full indicators"):
                         ind_cols = ["price", "stop_loss", "rsi", "rvol",
