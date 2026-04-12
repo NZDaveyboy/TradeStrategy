@@ -1127,6 +1127,107 @@ with tab_backtest:
             },
         )
 
+    # -----------------------------------------------------------------------
+    # Options backtest
+    # -----------------------------------------------------------------------
+
+    st.divider()
+    st.subheader("Options backtest")
+    st.caption("Simulated ATM and OTM call returns on each screener pick using Black-Scholes with 30d realised vol.")
+
+    conn = get_conn()
+    bt_opt_exists_bt = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='backtest_options'"
+    ).fetchone()
+    bt_opt_bt = pd.read_sql("SELECT * FROM backtest_options", conn) if bt_opt_exists_bt else pd.DataFrame()
+    conn.close()
+
+    if bt_opt_bt.empty:
+        st.info("No options backtest data yet.")
+        st.code("python3 options_backtest.py", language="bash")
+        st.warning("IV crush is not modelled. Simulated returns assume IV stays constant after entry.")
+    else:
+        bt_opt_fwd_bt = bt_opt_bt.dropna(subset=["return_1d"])
+
+        # Top metrics
+        ob1, ob2, ob3, ob4 = st.columns(4)
+        ob1.metric("Simulated trades",  len(bt_opt_fwd_bt))
+        ob2.metric("Avg return (1d)",   f"{bt_opt_fwd_bt['return_1d'].mean():+.1f}%")
+        ob3.metric("Win rate (1d)",     f"{(bt_opt_fwd_bt['return_1d'] > 0).mean()*100:.0f}%")
+        ob4.metric("Avg return (5d)",   f"{bt_opt_fwd_bt['return_5d'].mean():+.1f}%" if "return_5d" in bt_opt_fwd_bt else "—")
+
+        st.warning("IV crush is not modelled — real options bought into high-RVOL moves will underperform these figures.")
+
+        # Return by strategy + score
+        st.subheader("Return by strategy and score")
+        opt_summary_bt = (
+            bt_opt_fwd_bt.groupby(["strategy_name", "screener_score"])
+            .agg(
+                trades   =("return_1d", "count"),
+                avg_1d   =("return_1d", "mean"),
+                avg_3d   =("return_3d", "mean"),
+                avg_5d   =("return_5d", "mean"),
+                win_rate =("return_1d", lambda x: (x > 0).mean() * 100),
+            )
+            .round(1)
+            .reset_index()
+        )
+        opt_summary_bt.columns = ["Strategy", "Score", "Trades", "Avg 1d %", "Avg 3d %", "Avg 5d %", "Win rate %"]
+        st.dataframe(opt_summary_bt, use_container_width=True, hide_index=True)
+
+        # Equity vs options comparison
+        conn = get_conn()
+        eq_bt_comp = pd.read_sql(
+            "SELECT run_date, ticker, score, return_1d AS eq_1d, return_3d AS eq_3d FROM backtest WHERE return_1d IS NOT NULL",
+            conn,
+        ) if bt_exists else pd.DataFrame()
+        conn.close()
+
+        if not eq_bt_comp.empty and not bt_opt_fwd_bt.empty:
+            st.subheader("Equity vs options — same picks")
+            atm_bt = bt_opt_fwd_bt[bt_opt_fwd_bt["strategy_name"] == "atm_call_30d"][
+                ["run_date", "ticker", "return_1d", "return_3d"]
+            ].rename(columns={"return_1d": "opt_1d", "return_3d": "opt_3d"})
+            comp_bt = eq_bt_comp.merge(atm_bt, on=["run_date", "ticker"], how="inner")
+            if not comp_bt.empty:
+                comp_bt_disp = comp_bt[["ticker", "run_date", "score", "eq_1d", "opt_1d", "eq_3d", "opt_3d"]].copy()
+                comp_bt_disp.columns = ["Ticker", "Date", "Score", "Equity 1d %", "Option 1d %", "Equity 3d %", "Option 3d %"]
+                st.dataframe(comp_bt_disp.sort_values("Option 1d %", ascending=False),
+                    use_container_width=True, hide_index=True,
+                    column_config={
+                        "Equity 1d %":  st.column_config.NumberColumn(format="%+.1f%%"),
+                        "Option 1d %":  st.column_config.NumberColumn(format="%+.1f%%"),
+                        "Equity 3d %":  st.column_config.NumberColumn(format="%+.1f%%"),
+                        "Option 3d %":  st.column_config.NumberColumn(format="%+.1f%%"),
+                    })
+                st.caption("Option returns are simulated (Black-Scholes, constant IV).")
+
+        # Full options trade log
+        st.subheader("Options trade log")
+        obl1, obl2 = st.columns(2)
+        filt_strat_bt = obl1.selectbox("Strategy", ["All"] + sorted(bt_opt_fwd_bt["strategy_name"].unique()), key="bt_opt_strat")
+        filt_score_bt = obl2.slider("Min score", 0, 4, 0, key="bt_opt_score")
+        filtered_opt_bt = bt_opt_fwd_bt.copy()
+        if filt_strat_bt != "All":
+            filtered_opt_bt = filtered_opt_bt[filtered_opt_bt["strategy_name"] == filt_strat_bt]
+        filtered_opt_bt = filtered_opt_bt[filtered_opt_bt["screener_score"] >= filt_score_bt]
+        filtered_opt_bt = filtered_opt_bt.sort_values(["run_date", "screener_score"], ascending=[False, False])
+
+        opt_log_cols = ["run_date", "ticker", "screener_score", "strategy_name",
+                        "entry_stock_px", "strike", "entry_iv", "entry_opt_px", "entry_delta",
+                        "return_1d", "return_3d", "return_5d", "return_10d"]
+        opt_log_cols = [c for c in opt_log_cols if c in filtered_opt_bt.columns]
+        st.caption(f"{len(filtered_opt_bt)} simulated trades")
+        st.dataframe(filtered_opt_bt[opt_log_cols], use_container_width=True, hide_index=True,
+            column_config={
+                "return_1d":      st.column_config.NumberColumn("1d %",  format="%+.1f%%"),
+                "return_3d":      st.column_config.NumberColumn("3d %",  format="%+.1f%%"),
+                "return_5d":      st.column_config.NumberColumn("5d %",  format="%+.1f%%"),
+                "return_10d":     st.column_config.NumberColumn("10d %", format="%+.1f%%"),
+                "entry_iv":       st.column_config.NumberColumn("IV",    format="%.1%%"),
+                "screener_score": st.column_config.NumberColumn("Score", format="%d/4"),
+            })
+
 
 # ===========================================================================
 # TAB 5 — Advice
@@ -1348,9 +1449,6 @@ with tab_advice:
                     st.markdown("**Position size:**")
                     st.markdown(sizing_advice(row, risk_nzd, nzdusd))
 
-                    with st.expander("Options recommendation"):
-                        st.markdown(options_rec(row))
-
                     with st.expander("Full indicators"):
                         ind_cols = ["price", "stop_loss", "rsi", "rvol",
                                     "ema9", "ema20", "ema200", "macd", "macd_signal", "vwap"]
@@ -1377,6 +1475,42 @@ with tab_advice:
                                 st.markdown(co["website"])
                         else:
                             st.caption("No company data available.")
+
+        st.divider()
+
+        # -----------------------------------------------------------------------
+        # Options recommendations — separate section
+        # -----------------------------------------------------------------------
+
+        st.subheader("Options recommendations")
+        st.caption(
+            "Options strategy for each top pick, based on directional setup and IV environment. "
+            "Check the Options tab for exact contract pricing."
+        )
+
+        equity_picks = top_picks[~top_picks["ticker"].str.endswith("-USD")]
+        crypto_picks = top_picks[top_picks["ticker"].str.endswith("-USD")]
+
+        if equity_picks.empty:
+            st.info("No equity picks today — no options recommendations to show.")
+        else:
+            for _, row in equity_picks.iterrows():
+                ticker    = row["ticker"]
+                direction = str(row.get("direction") or "")
+                score     = int(row["score"])
+                stars     = "★" * score + "☆" * (4 - score)
+
+                with st.container(border=True):
+                    oc1, oc2, oc3 = st.columns([2, 1, 1])
+                    oc1.markdown(f"### {ticker}  `{stars}`")
+                    oc2.metric("Direction",
+                               "🟢 Long" if direction == "long" else
+                               "🔴 Short" if direction == "short" else direction or "—")
+                    oc3.metric("Price", f"${row['price']:.2f}")
+                    st.markdown(options_rec(row))
+
+        if not crypto_picks.empty:
+            st.caption("Crypto picks: " + ", ".join(crypto_picks["ticker"].tolist()) + " — options not available for crypto.")
 
         st.divider()
 
