@@ -25,10 +25,4 @@ jobs:
 
       - run: python run.py
 
-      - name: Commit results
-        run: |
-          git config user.name "github-actions"
-          git config user.email "github-actions@github.com"
-          git add -f screener.db
-          git commit -m "Screener run $(date +%Y-%m-%d)" || echo "Nothing to commit"
-          git push
+      # screener.db is gitignored — results persist locally only.
