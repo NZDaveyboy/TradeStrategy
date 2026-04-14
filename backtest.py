@@ -22,7 +22,10 @@ import time
 from datetime import datetime, timedelta
 
 import pandas as pd
-import yfinance as yf
+
+from providers.yfinance_provider import YFinanceProvider
+
+_provider = YFinanceProvider()
 
 DB_PATH = os.path.join(os.path.dirname(__file__), "screener.db")
 
@@ -114,10 +117,10 @@ def fetch_forward_prices(ticker: str, run_date: str) -> dict:
     end   = start + timedelta(days=20)   # enough buffer for weekends/holidays
 
     try:
-        hist = yf.Ticker(ticker).history(
+        hist = _provider.get_ohlcv_range(
+            ticker,
             start=start.strftime("%Y-%m-%d"),
             end=end.strftime("%Y-%m-%d"),
-            interval="1d",
         )
     except Exception:
         return {}

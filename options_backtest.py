@@ -28,7 +28,10 @@ import time
 
 import numpy as np
 import pandas as pd
-import yfinance as yf
+
+from providers.yfinance_provider import YFinanceProvider
+
+_provider = YFinanceProvider()
 
 DB_PATH = os.path.join(os.path.dirname(__file__), "screener.db")
 
@@ -76,7 +79,7 @@ def bs_delta(S, K, T, r, sigma, opt="call") -> float:
 def realised_vol(ticker: str, as_of: str, window: int = 30) -> float | None:
     """Annualised 30d realised vol from daily returns ending on as_of."""
     try:
-        hist = yf.Ticker(ticker).history(period="90d", interval="1d")
+        hist = _provider.get_ohlcv(ticker, "90d", "1d")
         if hist.empty or len(hist) < window + 1:
             return None
         hist.index = hist.index.tz_localize(None)
@@ -100,10 +103,10 @@ def forward_closes(ticker: str, run_date: str) -> dict:
     start = datetime.strptime(run_date, "%Y-%m-%d")
     end   = start + timedelta(days=25)
     try:
-        hist = yf.Ticker(ticker).history(
+        hist = _provider.get_ohlcv_range(
+            ticker,
             start=start.strftime("%Y-%m-%d"),
             end=end.strftime("%Y-%m-%d"),
-            interval="1d",
         )
     except Exception:
         return {}

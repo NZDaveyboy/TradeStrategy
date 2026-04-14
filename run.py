@@ -19,9 +19,11 @@ import sqlite3
 from datetime import datetime, timezone
 
 import pandas as pd
-import requests
-import yfinance as yf
-from bs4 import BeautifulSoup
+
+from providers.yfinance_provider import FinvizDiscoveryProvider, YFinanceProvider
+
+_provider  = YFinanceProvider()
+_discovery = FinvizDiscoveryProvider()
 
 DB_PATH = os.path.join(os.path.dirname(__file__), "screener.db")
 
@@ -127,30 +129,7 @@ def save_results(run_date: str, rows: list[dict]):
 # ---------------------------------------------------------------------------
 
 def fetch_finviz_gainers(limit: int = 50) -> list[str]:
-    url = "https://finviz.com/screener.ashx?v=111&s=ta_topgainers"
-    headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/120.0.0.0 Safari/537.36"
-        )
-    }
-    try:
-        resp = requests.get(url, headers=headers, timeout=15)
-        resp.raise_for_status()
-        soup = BeautifulSoup(resp.text, "html.parser")
-        tickers = []
-        for a in soup.find_all("a", href=True):
-            href = a["href"]
-            if href.startswith("quote.ashx?t="):
-                t = href.split("t=")[1].split("&")[0].strip().upper()
-                if t and t not in tickers:
-                    tickers.append(t)
-        print(f"Finviz: {len(tickers)} top gainers")
-        return tickers[:limit]
-    except Exception as e:
-        print(f"Finviz fetch failed: {e}")
-        return []
+    return _discovery.get_gainers(limit)
 
 
 def load_ticker_file(path: str) -> list[str]:
@@ -616,8 +595,7 @@ def screen_ticker(ticker: str, strategy: str) -> dict | None:
     if ticker in _STABLECOINS:
         return None  # stablecoins have no trading edge — exclude from ranking
 
-    tk   = yf.Ticker(ticker)
-    data = tk.history(period="1y", interval="1d")
+    data = _provider.get_ohlcv(ticker, "1y", "1d")
     if len(data) < 20:
         return None
 
@@ -632,14 +610,10 @@ def screen_ticker(ticker: str, strategy: str) -> dict | None:
     rsi_val = rsi(close)
     atr_val = atr(data)
 
-    # Market cap via fast_info (fast, ~50 ms) for all tickers.
-    # Full info (slow) only for momentum strategy where float_shares is needed.
-    market_cap   = None
+    # Market cap via get_quote (fast, ~50ms) for all tickers.
+    # Full fundamentals (slow) only for momentum strategy where float_shares is needed.
+    market_cap   = _provider.get_quote(ticker).market_cap
     float_shares = None
-    try:
-        market_cap = getattr(tk.fast_info, "market_cap", None)
-    except Exception:
-        pass
 
     # Finviz top gainers are filtered strictly; curated lists always pass
     if strategy == "general" and not (
@@ -652,9 +626,9 @@ def screen_ticker(ticker: str, strategy: str) -> dict | None:
         return None
 
     if strategy == "momentum":
-        info         = tk.info
-        market_cap   = info.get("marketCap")
-        float_shares = info.get("floatShares")
+        fund         = _provider.get_fundamentals(ticker)
+        market_cap   = fund.market_cap
+        float_shares = fund.float_shares
         if not (
             market_cap   and market_cap   < 2_000_000_000
             and float_shares and float_shares < 50_000_000

@@ -10,7 +10,10 @@ from core.setups import compute_trade_setup
 import numpy as np
 import pandas as pd
 import streamlit as st
-import yfinance as yf
+
+from providers.yfinance_provider import YFinanceProvider
+
+_provider = YFinanceProvider()
 
 DB_PATH = os.path.join(os.path.dirname(__file__), "screener.db")
 
@@ -82,13 +85,13 @@ def get_company_info(ticker: str) -> dict:
     if ticker.endswith("-USD"):
         return {}
     try:
-        info = yf.Ticker(ticker).info
+        fund = _provider.get_fundamentals(ticker)
         return {
-            "name":    info.get("longName") or info.get("shortName") or ticker,
-            "sector":  info.get("sector") or "",
-            "industry":info.get("industry") or "",
-            "summary": info.get("longBusinessSummary") or "",
-            "website": info.get("website") or "",
+            "name":    fund.name,
+            "sector":  fund.sector,
+            "industry":fund.industry,
+            "summary": fund.summary,
+            "website": fund.website,
         }
     except Exception:
         return {}
@@ -97,8 +100,8 @@ def get_company_info(ticker: str) -> dict:
 @st.cache_data(ttl=300)
 def fetch_nzdusd() -> float:
     try:
-        rate = yf.Ticker("NZDUSD=X").fast_info["last_price"]
-        return float(rate) if rate else 0.57
+        rate = _provider.get_quote("NZDUSD=X").last_price
+        return rate if rate else 0.57
     except Exception:
         return 0.57
 
@@ -111,10 +114,10 @@ def fetch_prices(tickers: tuple) -> dict:
         return result
     for ticker in tickers:
         try:
-            fi = yf.Ticker(ticker).fast_info
+            quote = _provider.get_quote(ticker)
             result[ticker] = {
-                "price":      float(fi.get("last_price") or fi.get("regularMarketPrice") or 0),
-                "prev_close": float(fi.get("previous_close") or fi.get("regularMarketPreviousClose") or 0),
+                "price":      quote.last_price,
+                "prev_close": quote.prev_close,
             }
         except Exception:
             result[ticker] = {"price": 0.0, "prev_close": 0.0}
@@ -1593,15 +1596,14 @@ def bs_greeks(S, K, T, r, sigma, opt="call") -> dict:
 
 @st.cache_data(ttl=300)
 def get_chain(ticker: str, expiry: str):
-    tk    = yf.Ticker(ticker)
-    chain = tk.option_chain(expiry)
-    spot  = float(tk.fast_info.get("last_price") or 0)
-    return chain.calls, chain.puts, spot
+    calls, puts = _provider.get_option_chain(ticker, expiry)
+    spot        = _provider.get_quote(ticker).last_price
+    return calls, puts, spot
 
 @st.cache_data(ttl=3600)
 def get_rv30(ticker: str) -> float | None:
     try:
-        hist = yf.Ticker(ticker).history(period="90d", interval="1d")
+        hist = _provider.get_ohlcv(ticker, "90d", "1d")
         if len(hist) < 31:
             return None
         lr = np.log(hist["Close"] / hist["Close"].shift(1)).dropna()
@@ -1713,9 +1715,8 @@ with tab_options:
                     conn.close()
                     screener_row = _sq.iloc[0].to_dict() if not _sq.empty else None
 
-                tk       = yf.Ticker(opt_ticker)
-                spot     = float(tk.fast_info.get("last_price") or 0)
-                expiries = tk.options
+                spot     = _provider.get_quote(opt_ticker).last_price
+                expiries = _provider.get_expiries(opt_ticker)
                 rv30     = get_rv30(opt_ticker)
 
                 if not expiries or not spot:
@@ -1905,10 +1906,9 @@ with tab_options:
             st.info("Enter a ticker to load its options chain.")
         else:
             try:
-                tk      = yf.Ticker(opt_ticker)
-                expiries = tk.options
-                spot    = float(tk.fast_info.get("last_price") or 0)
-                rv30    = get_rv30(opt_ticker)
+                spot     = _provider.get_quote(opt_ticker).last_price
+                expiries = _provider.get_expiries(opt_ticker)
+                rv30     = get_rv30(opt_ticker)
 
                 if not expiries:
                     st.warning(f"No options data for {opt_ticker}.")
@@ -2049,9 +2049,8 @@ with tab_options:
             st.warning("Enter a ticker above to build this strategy.")
         else:
             try:
-                tk       = yf.Ticker(opt_ticker)
-                expiries = tk.options
-                spot     = float(tk.fast_info.get("last_price") or 0)
+                spot     = _provider.get_quote(opt_ticker).last_price
+                expiries = _provider.get_expiries(opt_ticker)
                 rv30     = get_rv30(opt_ticker)
 
                 if not expiries:
@@ -2336,9 +2335,8 @@ with tab_learn:
     @st.cache_data(ttl=600)
     def learn_example():
         try:
-            tk    = yf.Ticker("INTC")
-            spot  = float(tk.fast_info.get("last_price") or 62)
-            expiries = tk.options
+            spot     = _provider.get_quote("INTC").last_price or 62
+            expiries = _provider.get_expiries("INTC")
             # Pick ~30 DTE expiry
             today_dt = datetime.utcnow().date()
             exp = None

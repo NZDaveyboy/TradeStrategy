@@ -35,7 +35,10 @@ def _load_env():
 _load_env()
 
 import requests
-import yfinance as yf
+
+from providers.yfinance_provider import YFinanceProvider
+
+_provider = YFinanceProvider()
 
 # ---------------------------------------------------------------------------
 # Config
@@ -63,7 +66,7 @@ def _spy_regime() -> str:
     Also appends a brief descriptor.
     """
     try:
-        hist = yf.Ticker("SPY").history(period="60d", interval="1d")
+        hist = _provider.get_ohlcv("SPY", "60d", "1d")
         if len(hist) < 20:
             return "Neutral — insufficient SPY data"
         close = hist["Close"]

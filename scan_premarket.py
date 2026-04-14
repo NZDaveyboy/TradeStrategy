@@ -36,7 +36,10 @@ _load_env()
 
 
 import requests
-import yfinance as yf
+
+from providers.yfinance_provider import YFinanceProvider
+
+_provider = YFinanceProvider()
 
 # ---------------------------------------------------------------------------
 # Config
@@ -113,8 +116,7 @@ def load_tickers() -> list[str]:
 
 def scan_ticker(ticker: str) -> dict | None:
     try:
-        tk   = yf.Ticker(ticker)
-        hist = tk.history(period="20d", interval="1d")
+        hist = _provider.get_ohlcv(ticker, "20d", "1d")
 
         if len(hist) < 3:
             return None
@@ -124,18 +126,10 @@ def scan_ticker(ticker: str) -> dict | None:
         today_vol  = float(hist["Volume"].iloc[-1])
         rvol       = today_vol / avg_vol if avg_vol > 0 else 0.0
 
-        # Live price
-        fi = tk.fast_info
-        try:
-            current_price = float(fi.last_price)
-        except Exception:
-            current_price = float(hist["Close"].iloc[-1])
-
-        # Today's open for gap calc
-        try:
-            today_open = float(fi.open)
-        except Exception:
-            today_open = float(hist["Open"].iloc[-1])
+        # Live price — fall back to last close if quote unavailable
+        quote         = _provider.get_quote(ticker)
+        current_price = quote.last_price or float(hist["Close"].iloc[-1])
+        today_open    = quote.open        or float(hist["Open"].iloc[-1])
 
         if prev_close <= 0:
             return None

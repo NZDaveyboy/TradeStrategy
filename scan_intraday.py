@@ -44,7 +44,10 @@ _load_env()
 
 import pandas as pd
 import requests
-import yfinance as yf
+
+from providers.yfinance_provider import YFinanceProvider
+
+_provider = YFinanceProvider()
 
 # ---------------------------------------------------------------------------
 # Config
@@ -100,8 +103,7 @@ def load_tickers(crypto_only: bool = False) -> list[str]:
 
 def scan_ticker(ticker: str) -> dict | None:
     try:
-        tk   = yf.Ticker(ticker)
-        hist = tk.history(period="60d", interval="15m")
+        hist = _provider.get_ohlcv(ticker, "60d", "15m")
 
         # Some tokens return empty frames or lack timezone info
         if hist.empty or not hasattr(hist.index, "tz") or hist.index.tz is None:
