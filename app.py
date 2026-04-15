@@ -1593,7 +1593,7 @@ with tab_advice:
                 direction = str(row.get("direction") or "")
                 score     = int(row.get("score") or 0)
                 stars     = "★" * score + "☆" * (4 - score)
-                rec       = build_recommendation(row.to_dict())
+                rec       = build_recommendation(row.to_dict(), iv_mode="fallback")
 
                 with st.container(border=True):
                     oc1, oc2, oc3, oc4 = st.columns([2, 1, 1, 1])

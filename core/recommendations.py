@@ -193,24 +193,35 @@ def _build_rationale(
 # Public API
 # ---------------------------------------------------------------------------
 
+_IV_FALLBACK_WARNING = (
+    "IV data unavailable — conservative structure applied (spread preferred)."
+)
+
+
 def build_recommendation(
     row: dict,
     *,
-    atm_iv: float | None = None,
-    rv30:   float | None = None,
+    atm_iv:  float | None = None,
+    rv30:    float | None = None,
+    iv_mode: str = "live",
 ) -> Recommendation:
     """
     Build a Recommendation from a screener results row dict.
 
-    Optional keyword args:
-        atm_iv  — live ATM implied volatility (decimal, e.g. 0.35)
-        rv30    — 30-day realised volatility (decimal, e.g. 0.28)
-        When omitted, iv_assessment is set to "unavailable" and IV
-        plays no part in strategy selection.
+    iv_mode controls how IV data affects strategy selection:
 
-    Returns a Recommendation dataclass. Both the Advice tab and the
-    Options tab call this function with the same row so recommendations
-    are always identical between tabs.
+        "live"     — pass atm_iv and rv30; strategy branches on IV state.
+                     Expensive IV → spread. Cheap/fair IV → outright.
+                     Used by the Options tab which fetches live IV per ticker.
+
+        "fallback" — IV data not available (Advice tab, which would need a
+                     yfinance round-trip per ticker in a render loop).
+                     iv_assessment is set to "unavailable", strategy defaults
+                     to spread (conservative — defined risk regardless of IV).
+                     A warning is added so the UI can surface the limitation.
+
+    Same ticker + same iv_mode + same inputs → identical strategy_name.
+    Advice tab always uses "fallback". Options tab always uses "live".
     """
     ticker     = str(row.get("ticker") or "")
     price      = float(row.get("price")   or 0)
@@ -304,7 +315,11 @@ def build_recommendation(
                 f"{MAX_STOP_DISTANCE_PCT*100:.0f}% cap — risk/reward not viable at current price."
             )
         else:
-            strategy_name = "bull_call_spread" if iv == "expensive" else "long_call"
+            if iv_mode == "fallback":
+                strategy_name = "bull_call_spread"
+                warnings.append(_IV_FALLBACK_WARNING)
+            else:
+                strategy_name = "bull_call_spread" if iv == "expensive" else "long_call"
             setup_type    = "clean_breakout" if tradescore >= 60 else "emerging_momentum"
             rec_cat       = "actionable"
             is_actionable = True
@@ -330,7 +345,11 @@ def build_recommendation(
                 f"{MAX_STOP_DISTANCE_PCT*100:.0f}% cap — wait for better entry."
             )
         else:
-            strategy_name = "bear_put_spread" if iv == "expensive" else "long_put"
+            if iv_mode == "fallback":
+                strategy_name = "bear_put_spread"
+                warnings.append(_IV_FALLBACK_WARNING)
+            else:
+                strategy_name = "bear_put_spread" if iv == "expensive" else "long_put"
             setup_type    = "clean_breakout"
             rec_cat       = "actionable"
             is_actionable = True

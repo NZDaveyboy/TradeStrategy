@@ -169,41 +169,69 @@ def test_within_stop_cap_is_actionable():
 
 
 # ---------------------------------------------------------------------------
-# 4. Advice and Options paths produce identical strategy_name / invalidation
+# 4. iv_mode consistency — same mode + same inputs → identical output
 # ---------------------------------------------------------------------------
 
-def test_same_row_same_strategy_no_iv():
-    """Without IV data both tabs should produce identical output."""
+def test_fallback_mode_same_strategy_both_calls():
+    """Both tabs calling with iv_mode='fallback' produce identical strategy_name."""
     row = _row()
-    rec_advice  = build_recommendation(row)
-    rec_options = build_recommendation(row)
+    rec_advice  = build_recommendation(row, iv_mode="fallback")
+    rec_options = build_recommendation(row, iv_mode="fallback")
     assert rec_advice.strategy_name      == rec_options.strategy_name
     assert rec_advice.invalidation_price == rec_options.invalidation_price
 
 
-def test_same_row_same_strategy_with_iv():
-    """With IV data both tabs should still produce identical output."""
+def test_live_mode_same_iv_same_strategy():
+    """Both tabs calling with iv_mode='live' and identical IV produce identical output."""
     row = _row()
-    rec_advice  = build_recommendation(row, atm_iv=0.45, rv30=0.30)
-    rec_options = build_recommendation(row, atm_iv=0.45, rv30=0.30)
-    assert rec_advice.strategy_name      == rec_options.strategy_name
-    assert rec_advice.invalidation_price == rec_options.invalidation_price
+    rec_a = build_recommendation(row, atm_iv=0.45, rv30=0.30, iv_mode="live")
+    rec_b = build_recommendation(row, atm_iv=0.45, rv30=0.30, iv_mode="live")
+    assert rec_a.strategy_name      == rec_b.strategy_name
+    assert rec_a.invalidation_price == rec_b.invalidation_price
 
 
-def test_iv_expensive_selects_spread_not_outright():
+def test_live_mode_expensive_iv_returns_spread():
     # atm_iv 45% vs rv30 30% → expensive → bull_call_spread
-    rec = build_recommendation(_row(), atm_iv=0.45, rv30=0.30)
+    rec = build_recommendation(_row(), atm_iv=0.45, rv30=0.30, iv_mode="live")
     assert rec.strategy_name == "bull_call_spread"
 
 
-def test_iv_cheap_selects_outright_call():
+def test_live_mode_cheap_iv_returns_outright_call():
     # atm_iv 20% vs rv30 30% → cheap → long_call
-    rec = build_recommendation(_row(), atm_iv=0.20, rv30=0.30)
+    rec = build_recommendation(_row(), atm_iv=0.20, rv30=0.30, iv_mode="live")
     assert rec.strategy_name == "long_call"
 
 
-def test_no_iv_data_selects_long_call_by_default():
-    rec = build_recommendation(_row())
+def test_fallback_mode_long_always_returns_spread():
+    """Fallback must never return long_call regardless of any IV inputs passed."""
+    rec = build_recommendation(_row(), iv_mode="fallback")
+    assert rec.strategy_name == "bull_call_spread"
+
+
+def test_fallback_mode_short_always_returns_spread():
+    """Fallback must never return long_put regardless of any IV inputs passed."""
+    row = _row(direction="short", price=143.0, ema20=145.0, atr=3.0)
+    rec = build_recommendation(row, iv_mode="fallback")
+    assert rec.strategy_name == "bear_put_spread"
+
+
+def test_fallback_mode_has_iv_warning():
+    """Fallback mode must include the standard IV unavailable warning string."""
+    from core.recommendations import _IV_FALLBACK_WARNING
+    rec = build_recommendation(_row(), iv_mode="fallback")
+    assert any(_IV_FALLBACK_WARNING in w for w in rec.warnings), (
+        f"Expected fallback warning in warnings. Got: {rec.warnings}"
+    )
+
+
+def test_fallback_mode_iv_assessment_is_unavailable():
+    rec = build_recommendation(_row(), iv_mode="fallback")
+    assert rec.iv_assessment == "unavailable"
+
+
+def test_live_mode_no_iv_data_defaults_to_long_call():
+    """Live mode without atm_iv/rv30 still uses outright (iv='unavailable' → not expensive)."""
+    rec = build_recommendation(_row(), iv_mode="live")
     assert rec.strategy_name == "long_call"
     assert rec.iv_assessment == "unavailable"
 
