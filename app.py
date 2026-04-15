@@ -4,6 +4,7 @@ import os
 import sqlite3
 from datetime import date, datetime
 
+from core.recommendations import STRATEGY_DISPLAY, build_recommendation
 from core.sec_edgar import get_recent_filings
 from core.setups import compute_trade_setup
 
@@ -1337,66 +1338,58 @@ with tab_advice:
     # Helpers
     # -----------------------------------------------------------------------
 
-    def options_rec(row: pd.Series) -> str:
-        """Plain-English options recommendation from screener data alone."""
-        direction  = str(row.get("direction") or "")
-        setup_type = str(row.get("setup_type") or "")
-        price      = float(row.get("price") or 0)
-        atr        = float(row.get("atr") or price * 0.02)
-        vwap       = float(row.get("vwap") or price)
-        ema20      = float(row.get("ema20") or price)
-        ticker     = str(row.get("ticker") or "")
-
-        if ticker.endswith("-USD"):
+    def _format_rec_markdown(rec) -> str:
+        """Format a Recommendation as Advice-tab markdown."""
+        if rec.setup_type == "crypto_no_options":
             return "_Options are not available for crypto — use directional position sizing above._"
 
-        if direction == "long":
-            entry  = round(price * 1.001, 2)
-            stop   = round(min(vwap, ema20) - 0.35 * atr, 2)
-            target = round(entry + 2 * (entry - stop), 2)
-            return "\n".join([
-                "**Bullish — Long Call or Bull Call Spread**",
-                "",
-                f"- **Strategy:** Long Call when IV is fair/low. Bull Call Spread when IV is elevated (check IV vs 30d RV on the Options tab).",
-                f"- **Expiry:** 30–45 DTE",
-                f"- **Strike:** ATM near ${entry:.2f} (breakout entry zone). Target delta ~0.50.",
-                f"- **Exit thesis invalidated:** below ${stop:.2f} (VWAP/EMA20 support). Close the option.",
-                f"- **Profit target:** ${target:.2f} (2R). Take 50–80% profit — don't hold to expiry.",
-                "",
-                "_Options tab → Recommendations for exact contract pricing._",
-            ])
+        if not rec.is_actionable or rec.strategy_name == "wait":
+            header = {
+                "extended":           "**Extended move — wait for a pullback**",
+                "pullback_candidate": "**Stop too wide — wait for a better entry**",
+                "liquidity_concern":  "**Low liquidity — avoid options**",
+            }.get(rec.setup_type, "**No clear directional edge — wait**")
+            lines = [header, "", rec.rationale]
+            if rec.invalidation_price:
+                lines.append(
+                    f"\n_Watch: pullback toward ${rec.invalidation_price:.2f} "
+                    "(EMA20 − ½ ATR) before reassessing._"
+                )
+            if rec.warnings:
+                lines.append("")
+                for w in rec.warnings:
+                    lines.append(f"⚠️ {w}")
+            lines.append("\n_Options tab → Recommendations for exact contract pricing._")
+            return "\n".join(lines)
 
-        elif direction == "short":
-            entry  = round(price * 0.999, 2)
-            stop   = round(max(vwap, ema20) + 0.35 * atr, 2)
-            target = round(max(0.01, entry - 2 * (stop - entry)), 2)
-            return "\n".join([
-                "**Bearish — Long Put or Bear Put Spread**",
-                "",
-                f"- **Strategy:** Long Put when IV is fair/low. Bear Put Spread when IV is elevated.",
-                f"- **Expiry:** 30–45 DTE",
-                f"- **Strike:** ATM near ${entry:.2f} (breakdown entry zone). Target delta ~−0.50.",
-                f"- **Exit thesis invalidated:** above ${stop:.2f} (VWAP/EMA20 resistance). Close the option.",
-                f"- **Profit target:** ${target:.2f} (2R). Take 50–80% profit before expiry.",
-                "",
-                "_Options tab → Recommendations for exact contract pricing._",
-            ])
+        display   = STRATEGY_DISPLAY.get(rec.strategy_name, rec.strategy_name)
+        bias      = "Bullish" if rec.direction == "long" else "Bearish"
+        delta_ref = "~0.50" if rec.direction == "long" else "~−0.50"
+        side      = "below" if rec.direction == "long" else "above"
 
-        elif setup_type in {"Strong but extended", "Overextended", "Extended downside move", "Strong downside setup"}:
-            pullback   = round(max(vwap, ema20), 2)
-            csp_strike = round(price * 0.93, 2)
-            return "\n".join([
-                "**Extended move — Cash-Secured Put (pullback entry)**",
-                "",
-                f"- **Strategy:** Sell an OTM put to collect premium or get long on a pullback at a discount.",
-                f"- **Strike:** Around ${csp_strike:.2f} (~7% below spot, near support).",
-                f"- **Expiry:** 20–30 DTE. Close at 50% profit rather than holding to expiry.",
-                f"- **Pullback watch zone:** ${pullback:.2f} (VWAP/EMA20). If price returns here, reassess for a directional entry.",
-                "",
-                "_Options tab → Recommendations for exact contract pricing._",
-            ])
-
-        return "_No clear directional setup — wait for a better signal before trading options._"
+        lines = [
+            f"**{bias} — {display}**",
+            "",
+            f"- **Strategy:** {display}. "
+            + (
+                "Spread chosen to reduce vega cost — IV is elevated."
+                if rec.iv_assessment == "expensive" else
+                "IV is fair/cheap — outright option captures full move."
+                if rec.iv_assessment in ("fair", "cheap") else
+                "Check IV vs 30d RV on the Options tab before choosing outright vs spread."
+            ),
+            "- **Expiry:** 30–45 DTE",
+            f"- **Strike:** ATM near ${rec.entry_reference:.2f}. Target delta {delta_ref}.",
+            f"- **Exit thesis invalidated:** {side} ${rec.invalidation_price:.2f} "
+            "(EMA20 ± ½ ATR). Close the option.",
+            f"- **Profit target:** ${rec.target_price:.2f} (2R). Take 50–80% profit — don't hold to expiry.",
+        ]
+        if rec.warnings:
+            lines.append("")
+            for w in rec.warnings:
+                lines.append(f"⚠️ {w}")
+        lines += ["", "_Options tab → Recommendations for exact contract pricing._"]
+        return "\n".join(lines)
 
     def signal_reasons(row: pd.Series) -> list[str]:
         """Plain-English reasons why this stock scored what it scored."""
@@ -1475,7 +1468,7 @@ with tab_advice:
 
         conn = get_conn()
         today_df = pd.read_sql(
-            "SELECT * FROM results WHERE run_date = ? ORDER BY score DESC, change_pct DESC",
+            "SELECT * FROM results WHERE run_date = ? ORDER BY tradescore DESC, change_pct DESC",
             conn, params=(latest_date,)
         )
 
@@ -1516,12 +1509,15 @@ with tab_advice:
         # Top picks — score 3 and 4
         # -----------------------------------------------------------------------
 
-        top_picks = today_df[today_df["score"] >= 3]
+        # Sort by tradescore; include any row with a direction signal
+        top_picks = today_df[today_df["direction"].isin(["long", "short", "neutral"])].copy()
+        if "tradescore" in top_picks.columns:
+            top_picks = top_picks.sort_values("tradescore", ascending=False)
 
         st.subheader(f"Today's top picks  —  {latest_date}")
 
         if top_picks.empty:
-            st.warning("No stocks scored 3 or higher today. Check back after the next screener run.")
+            st.warning("No directional setups today. Check back after the next screener run.")
         else:
             for _, row in top_picks.iterrows():
                 ticker = row["ticker"]
@@ -1595,17 +1591,19 @@ with tab_advice:
             for _, row in equity_picks.iterrows():
                 ticker    = row["ticker"]
                 direction = str(row.get("direction") or "")
-                score     = int(row["score"])
+                score     = int(row.get("score") or 0)
                 stars     = "★" * score + "☆" * (4 - score)
+                rec       = build_recommendation(row.to_dict())
 
                 with st.container(border=True):
-                    oc1, oc2, oc3 = st.columns([2, 1, 1])
+                    oc1, oc2, oc3, oc4 = st.columns([2, 1, 1, 1])
                     oc1.markdown(f"### {ticker}  `{stars}`")
                     oc2.metric("Direction",
                                "🟢 Long" if direction == "long" else
                                "🔴 Short" if direction == "short" else direction or "—")
                     oc3.metric("Price", f"${row['price']:.2f}")
-                    st.markdown(options_rec(row))
+                    oc4.metric("Stop", f"${rec.invalidation_price:.2f}" if rec.invalidation_price else "—")
+                    st.markdown(_format_rec_markdown(rec))
 
         if not crypto_picks.empty:
             st.caption("Crypto picks: " + ", ".join(crypto_picks["ticker"].tolist()) + " — options not available for crypto.")
@@ -1836,41 +1834,34 @@ with tab_options:
                     atm_iv = float(_atm_rows["impliedVolatility"].mean()) if not _atm_rows.empty else (rv30 or 0.30)
 
                     direction  = screener_row.get("direction")  if screener_row else None
-                    setup_type = screener_row.get("setup_type") if screener_row else None
                     tradescore = float(screener_row.get("tradescore") or 0) if screener_row else None
 
-                    iv_expensive = bool(rv30 and atm_iv > rv30 * 1.3)
-                    iv_cheap     = bool(rv30 and atm_iv < rv30 * 0.85)
+                    # Unified recommendation — same logic as Advice tab
+                    _rec_row = screener_row if screener_row else {"ticker": opt_ticker, "price": spot}
+                    rec = build_recommendation(
+                        _rec_row,
+                        atm_iv=atm_iv if atm_iv else None,
+                        rv30=rv30     if rv30     else None,
+                    )
+                    rec_strat = STRATEGY_DISPLAY.get(rec.strategy_name) if rec.is_actionable else None
+                    rec_bias  = (
+                        "Bullish" if direction == "long" else
+                        "Bearish" if direction == "short" else
+                        "Neutral / Pullback entry" if rec.strategy_name == "cash_secured_put" else None
+                    )
 
-                    # Strategy selection
-                    if direction == "long":
-                        rec_strat = "Bull Call Spread" if iv_expensive else "Long Call"
-                        rec_bias  = "Bullish"
-                        if iv_expensive:
-                            iv_note = f"IV {atm_iv*100:.0f}% is elevated vs 30d RV {rv30*100:.0f}% — spread reduces vega exposure and cuts premium cost."
-                        elif iv_cheap:
-                            iv_note = f"IV {atm_iv*100:.0f}% is below 30d RV {rv30*100:.0f}% — options are cheap, outright call is the better play."
+                    # IV note from rec
+                    if atm_iv:
+                        _iv_pct = f"IV {atm_iv*100:.0f}%"
+                        _rv_pct = f"30d RV {rv30*100:.0f}%" if rv30 else ""
+                        if rec.iv_assessment == "expensive":
+                            iv_note = f"{_iv_pct} is elevated vs {_rv_pct} — spread reduces vega exposure."
+                        elif rec.iv_assessment == "cheap":
+                            iv_note = f"{_iv_pct} is below {_rv_pct} — options are cheap, outright is the better play."
                         else:
-                            iv_note = f"IV {atm_iv*100:.0f}% is fair vs 30d RV {rv30*100:.0f}% — outright call is fine."
-                    elif direction == "short":
-                        rec_strat = "Bear Put Spread" if iv_expensive else "Long Put"
-                        rec_bias  = "Bearish"
-                        if iv_expensive:
-                            iv_note = f"IV {atm_iv*100:.0f}% elevated vs RV {rv30*100:.0f}% — spread reduces cost vs outright put."
-                        else:
-                            iv_note = f"IV {atm_iv*100:.0f}% fair/cheap vs RV {rv30*100:.0f}% — outright put captures full downside."
-                    elif setup_type in {"Strong but extended", "Overextended", "Extended downside move", "Strong downside setup"}:
-                        rec_strat = "Cash-Secured Put"
-                        rec_bias  = "Neutral / Pullback entry"
-                        iv_note   = (
-                            f"IV {atm_iv*100:.0f}% is elevated — good for premium collection."
-                            if iv_expensive else
-                            f"IV {atm_iv*100:.0f}% is fair."
-                        )
+                            iv_note = f"{_iv_pct}  |  {_rv_pct}" if rv30 else _iv_pct
                     else:
-                        rec_strat = None
-                        rec_bias  = None
-                        iv_note   = f"IV {atm_iv*100:.0f}%  |  30d RV {rv30*100:.0f}%" if rv30 else f"IV {atm_iv*100:.0f}%"
+                        iv_note = rec.rationale
 
                     # Context metrics
                     if screener_row:
@@ -1888,7 +1879,9 @@ with tab_options:
                     st.divider()
 
                     if not rec_strat:
-                        st.warning("No clear directional signal from the screener. Enter a ticker that has a long or short setup.")
+                        st.warning(rec.rationale or "No clear directional signal. Enter a ticker with a long or short setup.")
+                        for _w in rec.warnings:
+                            st.info(_w)
                     else:
                         call_strikes = sorted(calls_raw[calls_raw["bid"] > 0]["strike"].tolist())
                         put_strikes  = sorted(puts_raw[puts_raw["bid"] > 0]["strike"].tolist(), reverse=True)
@@ -1909,14 +1902,17 @@ with tab_options:
                         nzdusd_r = fetch_nzdusd()
                         T_exp = best_dte / 365.0
 
-                        if rec_strat == "Long Call":
+                        # Contract selection — keyed on rec.strategy_name (snake_case)
+                        _sn = rec.strategy_name
+
+                        if _sn == "long_call":
                             k1, prem1 = atm_call_k, _mid(calls_raw, atm_call_k)
                             legs = [{"type":"call","strike":k1,"premium":prem1,"qty":1,"position":"long"}]
                             net, max_loss, max_profit = prem1, round(prem1*100,2), "Unlimited"
                             be_price = round(k1 + prem1, 2)
                             strike_desc = f"Strike ${k1:.2f} (ATM call)"
 
-                        elif rec_strat == "Bull Call Spread":
+                        elif _sn == "bull_call_spread":
                             k1, k2 = atm_call_k, otm_call_k
                             p1, p2 = _mid(calls_raw, k1), _mid(calls_raw, k2)
                             net = round(p1 - p2, 3)
@@ -1929,14 +1925,14 @@ with tab_options:
                             be_price   = round(k1 + net, 2)
                             strike_desc = f"Buy ${k1:.2f} / Sell ${k2:.2f} call"
 
-                        elif rec_strat == "Long Put":
+                        elif _sn == "long_put":
                             k1, prem1 = atm_put_k, _mid(puts_raw, atm_put_k)
                             legs = [{"type":"put","strike":k1,"premium":prem1,"qty":1,"position":"long"}]
                             net, max_loss, max_profit = prem1, round(prem1*100,2), round((k1-prem1)*100,2)
                             be_price = round(k1 - prem1, 2)
                             strike_desc = f"Strike ${k1:.2f} (ATM put)"
 
-                        elif rec_strat == "Bear Put Spread":
+                        elif _sn == "bear_put_spread":
                             k1, k2 = atm_put_k, otm_put_k
                             p1, p2 = _mid(puts_raw, k1), _mid(puts_raw, k2)
                             net = round(p1 - p2, 3)
@@ -1949,7 +1945,7 @@ with tab_options:
                             be_price   = round(k1 - net, 2)
                             strike_desc = f"Buy ${k1:.2f} / Sell ${k2:.2f} put"
 
-                        else:  # Cash-Secured Put
+                        else:  # cash_secured_put
                             k1, prem1 = otm_put_k, _mid(puts_raw, otm_put_k)
                             legs = [{"type":"put","strike":k1,"premium":prem1,"qty":1,"position":"short"}]
                             net        = -prem1
@@ -1962,8 +1958,17 @@ with tab_options:
                         cost_nzd    = abs(net) * 100 / (nzdusd_r or 0.57)
 
                         st.subheader(f"Recommended: {rec_strat}")
-                        st.caption(f"{rec_bias}  ·  {opt_ticker}  ·  Expiry {best_exp} ({best_dte}d)  ·  {strike_desc}")
+                        if rec.invalidation_price:
+                            st.caption(
+                                f"{rec_bias}  ·  {opt_ticker}  ·  Expiry {best_exp} ({best_dte}d)  ·  {strike_desc}  "
+                                f"·  Stop ${rec.invalidation_price:.2f}"
+                            )
+                        else:
+                            st.caption(f"{rec_bias}  ·  {opt_ticker}  ·  Expiry {best_exp} ({best_dte}d)  ·  {strike_desc}")
                         st.info(iv_note)
+                        if rec.warnings:
+                            for _w in rec.warnings:
+                                st.warning(_w)
 
                         _rm1, _rm2, _rm3, _rm4 = st.columns(4)
                         _rm1.metric("Net cost",    f"${abs(net):.3f}/share")
