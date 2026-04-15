@@ -7,5 +7,6 @@ streamlit
 
 # Phase 7 — backtesting engine
 backtesting @ git+https://github.com/NZDaveyboy/backtesting.py
-# Phase 8 (analytics) — add when ready:
-#   quantstats @ git+https://github.com/NZDaveyboy/quantstats
+
+# Phase 8 — analytics and tearsheets
+quantstats @ git+https://github.com/NZDaveyboy/quantstats

@@ -1131,6 +1131,101 @@ with tab_backtest:
         )
 
     # -----------------------------------------------------------------------
+    # Backtest v2 — Strategy Simulation Analytics
+    # -----------------------------------------------------------------------
+
+    st.divider()
+    st.subheader("Strategy Simulation Analytics (v2)")
+    st.caption(
+        "Per-ticker results from `python3 backtest_v2.py` — market entry next bar open, "
+        "stop-loss from screener, time exit after max hold days."
+    )
+
+    from core.analytics import (
+        equity_curve        as _ec,
+        load_v2_data,
+        performance_by_score_bucket,
+        portfolio_stats,
+        win_rate_by_setup,
+    )
+
+    v2_df = load_v2_data()
+
+    if v2_df.empty:
+        st.info("No strategy simulation data yet.")
+        st.code("python3 backtest_v2.py", language="bash")
+    else:
+        # ── Key stats row ────────────────────────────────────────────────
+        pstats = portfolio_stats(v2_df)
+
+        def _fmt(v, fmt):
+            return fmt.format(v) if not (isinstance(v, float) and __import__("math").isnan(v)) else "—"
+
+        s1, s2, s3, s4, s5, s6 = st.columns(6)
+        s1.metric("Total trades",  pstats["total_trades"])
+        s2.metric("Win rate",      _fmt(pstats["win_rate"],     "{:.0f}%"))
+        s3.metric("Avg return",    _fmt(pstats["avg_return"],   "{:+.1f}%"))
+        s4.metric("Expectancy",    _fmt(pstats["expectancy"],   "{:+.2f}%"))
+        s5.metric("Sharpe",        _fmt(pstats["sharpe"],       "{:.2f}"))
+        s6.metric("Max drawdown",  _fmt(pstats["max_drawdown"], "{:.1f}%"))
+
+        st.divider()
+
+        # ── Equity curve ─────────────────────────────────────────────────
+        st.subheader("Portfolio equity curve")
+        st.caption("Cumulative product of per-ticker returns, ordered by backtest run date.")
+        ec = _ec(v2_df)
+        ec_df = ec.rename("Equity").to_frame()
+        ec_df.index = range(1, len(ec_df) + 1)
+        st.line_chart(ec_df)
+
+        st.divider()
+
+        # ── Win rate by setup type ────────────────────────────────────────
+        by_setup = win_rate_by_setup(v2_df)
+        if not by_setup.empty:
+            st.subheader("Win rate by setup type")
+            st.bar_chart(by_setup.set_index("Setup Type")[["Win Rate %", "Avg Return %"]])
+            st.dataframe(by_setup, use_container_width=True, hide_index=True,
+                column_config={
+                    "Win Rate %":   st.column_config.NumberColumn(format="%.1f%%"),
+                    "Avg Return %": st.column_config.NumberColumn(format="%+.1f%%"),
+                })
+            st.divider()
+
+        # ── Score bucket performance ──────────────────────────────────────
+        by_bucket = performance_by_score_bucket(v2_df)
+        if not by_bucket.empty:
+            st.subheader("Performance by TradeScore bucket")
+            st.dataframe(by_bucket, use_container_width=True, hide_index=True,
+                column_config={
+                    "Avg Return %": st.column_config.NumberColumn(format="%+.1f%%"),
+                    "Win Rate %":   st.column_config.NumberColumn(format="%.1f%%"),
+                    "Avg Trade %":  st.column_config.NumberColumn(format="%+.1f%%"),
+                })
+            st.divider()
+
+        # ── Per-ticker results table ──────────────────────────────────────
+        with st.expander("Per-ticker results table"):
+            disp_cols = [c for c in [
+                "ticker", "n_signals", "n_trades", "return_pct",
+                "win_rate", "sharpe", "max_drawdown", "avg_trade_pct",
+                "setup_type", "avg_tradescore", "error",
+            ] if c in v2_df.columns]
+            st.dataframe(
+                v2_df[disp_cols].sort_values("return_pct", ascending=False),
+                use_container_width=True, hide_index=True,
+                column_config={
+                    "return_pct":    st.column_config.NumberColumn("Return %",    format="%+.1f%%"),
+                    "win_rate":      st.column_config.NumberColumn("Win Rate %",  format="%.1f%%"),
+                    "avg_trade_pct": st.column_config.NumberColumn("Avg Trade %", format="%+.1f%%"),
+                    "max_drawdown":  st.column_config.NumberColumn("Max DD %",    format="%.1f%%"),
+                    "sharpe":        st.column_config.NumberColumn("Sharpe",      format="%.2f"),
+                    "avg_tradescore":st.column_config.NumberColumn("Avg Score",   format="%.0f"),
+                },
+            )
+
+    # -----------------------------------------------------------------------
     # Options backtest
     # -----------------------------------------------------------------------
 
