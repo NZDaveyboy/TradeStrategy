@@ -38,56 +38,64 @@ or crypto bot patterns.
 
 ## Key weaknesses to fix (in priority order)
 
-1. Data stack is fragile — yfinance + Finviz scraping + SQLite + CSV alerts
-2. No real news/catalyst layer — only a stub in the scoring model
-3. No test suite — zero credibility for open-source
-4. Backtesting is product-driven, not evidence-driven
-5. Analytics layer too light — no tearsheets, no Sharpe/Sortino, no drawdown reporting
-6. README undersells the product
-7. No packaging boundary — still reads like a personal codebase
+1. Data stack is fragile — yfinance + Finviz scraping + SQLite + CSV alerts *(provider abstraction delivered; underlying sources unchanged)*
+2. No real news/catalyst layer — EDGAR RSS watcher delivered; earnings/headlines still pending *(Phase 10)*
+3. No test suite ✅ — 144 tests as of April 2026
+4. Backtesting is product-driven, not evidence-driven — formal engine delivered; research mode in progress *(Phase 9)*
+5. Analytics layer too light ✅ — equity curve, Sharpe/Sortino, win rate, score buckets delivered
+6. README undersells the product *(Phase 11)*
+7. No packaging boundary — still reads like a personal codebase *(Phase 11)*
+
+---
+
+## Status — April 2026
+
+Phases 1–8 complete. Phase 9 in progress.
+
+Additional deliverables outside the original phase plan:
+- **Recommendation engine** (`core/recommendations.py`): unified strategy engine used by both
+  Advice and Options tabs. Fixes stop anchor (EMA20±ATR, not cumulative VWAP), extension check
+  ordering, and cross-tab consistency via explicit `iv_mode` parameter.
+- **EDGAR RSS watcher** (`core/edgar_rss.py`): polls SEC EDGAR Atom feeds (8-K, S-1, SC 13G),
+  matches against theme watchlist and screener universe. Early Signals panel in Screener tab.
+- **Theme watchlist** (`core/theme_watchlist.py`): curated AI Infrastructure list with
+  session-level overrides. Watchlist badges on opportunity cards. Watchlist section in Telegram brief.
+- **TradeScore extraction** (`core/tradescore.py`): scoring engine lifted from `run.py` into
+  its own module so research mode and tests can import it without the full screener.
 
 ---
 
 ## Phase plan
 
-### Phase 5 — Data provider abstraction (next)
+### Phase 5 — Data provider abstraction ✅
 Wrap yfinance and scraping behind provider interfaces.
-No user-facing changes. No scoring changes. No UI changes.
-Goal: future data source swaps don't break the app.
+Delivered: `providers/yfinance_provider.py` (YFinanceProvider, FinvizDiscoveryProvider),
+provider ABC, typed return contracts. Tests in `tests/test_providers.py`.
 
-Deliverables:
-- `tradestrategy/data/providers/base.py` — typed provider interface
-- `tradestrategy/data/providers/yfinance_provider.py` — wraps current yfinance calls
-- `tradestrategy/data/providers/scraped_provider.py` — wraps current scraping calls
-- `tradestrategy/data/models.py` — typed schemas for OHLCV, quotes, company info, option chains
-- Tests for provider contracts
+### Phase 6 — Test suite ✅
+pytest coverage for TradeScore, backtest engine, options pricing, providers,
+recommendations engine, EDGAR RSS, theme watchlist, analytics.
+144 tests passing as of April 2026.
 
-### Phase 6 — Test suite
-Add pytest coverage for: TradeScore correctness, backtest reproducibility, options math,
-provider contracts, daily brief generation, DB migration.
-Add GitHub Actions CI workflow.
+### Phase 7 — Formal backtest engine ✅
+`core/backtest_engine.py` + `backtest_v2.py`. backtesting.py-based strategy simulation:
+market entry next bar open, EMA20±ATR stop, configurable hold period and commission.
+Tests in `tests/test_backtest_engine.py`.
 
-### Phase 7 — Formal backtest engine
-Replace ad hoc backtest logic with a strategy abstraction inspired by backtesting.py.
-Support: configurable commissions, slippage, position sizing, stop/target handling,
-date-range replay, parameterized rules.
-Screener outputs should feed directly into formal strategy replays.
+### Phase 8 — Analytics and tearsheets ✅
+`core/analytics.py`: equity curve, Sharpe/Sortino, win rate by setup, score-bucket
+performance. Analytics section in Streamlit Backtest tab. Tests in `tests/test_analytics.py`.
 
-### Phase 8 — Analytics and tearsheets (QuantStats-style)
-Add to backtest outputs: equity curve, drawdowns, monthly returns heatmap,
-Sharpe/Sortino/CAGR/volatility, win rate, expectancy, payoff ratio,
-setup-type performance, score-bucket performance.
-Add exportable HTML report. Connect summary views to Streamlit.
-
-### Phase 9 — Research mode
+### Phase 9 — Research mode (in progress)
 Parameter sweeps for TradeScore thresholds, RVOL cutoffs, RSI bands, stop multiples.
-Fast comparative research. Walk-forward validation. CLI entry point.
+Walk-forward validation. CLI entry point (`research_mode.py`).
+Scoring engine extracted to `core/tradescore.py` in preparation.
 Goal: answer "does TradeScore > 55 actually outperform > 45?"
 
 ### Phase 10 — Catalyst layer (highest differentiation value)
 Real catalyst context for every setup:
 - Earnings dates
-- Recent SEC filings (already partially built)
+- Recent SEC filings (partially delivered via EDGAR RSS watcher)
 - Major headline ingestion
 - Analyst action flags
 - Event tags
