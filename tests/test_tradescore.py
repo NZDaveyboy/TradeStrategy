@@ -17,7 +17,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from run import compute_tradescore
+from core.tradescore import compute_tradescore
 
 
 # ---------------------------------------------------------------------------
