@@ -76,13 +76,23 @@ def _lerp(val: float, lo: float, hi: float) -> float:
 # Sub-score functions
 # ---------------------------------------------------------------------------
 
-def _momentum_score(row: dict) -> tuple[float, dict]:
+def _momentum_score(row: dict, *, weights: dict | None = None) -> tuple[float, dict]:
     """
     MomentumScore 0–25.
     RVOL (10) + Change% (8) + MACD (7).
     RVOL sub-linear above ideal — extreme RVOL can signal panic/chase, not edge.
     Change% decays above sweet spot so a 15% gap day isn't rewarded more than 8%.
+
+    weights: optional dict of constant overrides for research sweeps, e.g.
+        {"ms_rvol_max_pts": 12, "ms_chg_max_pts": 6}
     """
+    w = weights or {}
+    ms_rvol_ideal   = w.get("ms_rvol_ideal",   MS_RVOL_IDEAL)
+    ms_rvol_max_pts = w.get("ms_rvol_max_pts", MS_RVOL_MAX_PTS)
+    ms_chg_hi_pct   = w.get("ms_chg_hi_pct",   MS_CHG_HI_PCT)
+    ms_chg_max_pts  = w.get("ms_chg_max_pts",  MS_CHG_MAX_PTS)
+    ms_macd_max_pts = w.get("ms_macd_max_pts", MS_MACD_MAX_PTS)
+
     rvol       = float(row.get("rvol", 0))
     change_pct = float(row.get("change_pct", 0))
     macd       = float(row.get("macd", 0))
@@ -92,25 +102,25 @@ def _momentum_score(row: dict) -> tuple[float, dict]:
     # RVOL: ramps up to ideal, then slowly diminishes for extremes
     if rvol <= 0:
         rvol_pts = 0.0
-    elif rvol <= MS_RVOL_IDEAL:
-        rvol_pts = MS_RVOL_MAX_PTS * (rvol / MS_RVOL_IDEAL) ** 0.6
+    elif rvol <= ms_rvol_ideal:
+        rvol_pts = ms_rvol_max_pts * (rvol / ms_rvol_ideal) ** 0.6
     else:
-        excess   = _clamp((rvol - MS_RVOL_IDEAL) / MS_RVOL_IDEAL)
-        rvol_pts = MS_RVOL_MAX_PTS * (1.0 - 0.2 * excess)
-    rvol_pts = _clamp(rvol_pts, 0, MS_RVOL_MAX_PTS)
+        excess   = _clamp((rvol - ms_rvol_ideal) / ms_rvol_ideal)
+        rvol_pts = ms_rvol_max_pts * (1.0 - 0.2 * excess)
+    rvol_pts = _clamp(rvol_pts, 0, ms_rvol_max_pts)
 
     # Change%: full at sweet spot ceiling, decays above it
     if change_pct <= 0:
         chg_pts = 0.0
-    elif change_pct <= MS_CHG_HI_PCT:
-        chg_pts = MS_CHG_MAX_PTS * (change_pct / MS_CHG_HI_PCT)
+    elif change_pct <= ms_chg_hi_pct:
+        chg_pts = ms_chg_max_pts * (change_pct / ms_chg_hi_pct)
     else:
-        chg_pts = MS_CHG_MAX_PTS * max(0.4, 1.0 - (change_pct - MS_CHG_HI_PCT) / 25.0)
-    chg_pts = _clamp(chg_pts, 0, MS_CHG_MAX_PTS)
+        chg_pts = ms_chg_max_pts * max(0.4, 1.0 - (change_pct - ms_chg_hi_pct) / 25.0)
+    chg_pts = _clamp(chg_pts, 0, ms_chg_max_pts)
 
-    # MACD: normalized to ATR. ±0.10 ATR diff maps to 0–7 pts.
+    # MACD: normalized to ATR. ±0.10 ATR diff maps to 0–macd_max pts.
     macd_norm = (macd - macd_sig) / atr_val
-    macd_pts  = _clamp((macd_norm + 0.1) / 0.2) * MS_MACD_MAX_PTS
+    macd_pts  = _clamp((macd_norm + 0.1) / 0.2) * ms_macd_max_pts
 
     total = rvol_pts + chg_pts + macd_pts
     return round(total, 2), {
@@ -120,34 +130,49 @@ def _momentum_score(row: dict) -> tuple[float, dict]:
     }
 
 
-def _early_entry_score(row: dict, close: pd.Series | None) -> tuple[float, dict]:
+def _early_entry_score(
+    row: dict, close: pd.Series | None, *, weights: dict | None = None
+) -> tuple[float, dict]:
     """
     EarlyEntryScore 0–25.
     RSI zone (10) + EMA20 proximity (8) + breakout-from-base (7).
     RSI 52–68 is the sweet spot: confirmed momentum, not yet overbought.
     EMA proximity rewards names that haven't yet run far from their trend.
     BOB (breakout-from-base) rewards price at or near 20-session highs.
+
+    weights: optional dict of constant overrides for research sweeps, e.g.
+        {"ee_rsi_lo": 50, "ee_rsi_max_pts": 12, "ee_bob_max_pts": 5}
+    Note: bob_pts is 0 when close=None (close series not stored in screener DB).
     """
+    w = weights or {}
+    ee_rsi_lo      = w.get("ee_rsi_lo",       EE_RSI_LO)
+    ee_rsi_hi      = w.get("ee_rsi_hi",       EE_RSI_HI)
+    ee_rsi_max_pts = w.get("ee_rsi_max_pts",  EE_RSI_MAX_PTS)
+    ee_ema_near    = w.get("ee_ema_near_pct", EE_EMA_NEAR_PCT)
+    ee_ema_far     = w.get("ee_ema_far_pct",  EE_EMA_FAR_PCT)
+    ee_ema_max_pts = w.get("ee_ema_max_pts",  EE_EMA_MAX_PTS)
+    ee_bob_max_pts = w.get("ee_bob_max_pts",  EE_BOB_MAX_PTS)
+
     rsi_val = float(row.get("rsi", 50))
     ema20   = float(row.get("ema20", 0)) or float(row.get("price", 1))
     price   = float(row.get("price", 1)) or 1.0
 
-    # RSI zone: peak in [EE_RSI_LO, EE_RSI_HI], decays linearly outside
-    if EE_RSI_LO <= rsi_val <= EE_RSI_HI:
-        rsi_pts = float(EE_RSI_MAX_PTS)
-    elif 42 <= rsi_val < EE_RSI_LO:
-        rsi_pts = EE_RSI_MAX_PTS * _lerp(rsi_val, 42, EE_RSI_LO)
-    elif EE_RSI_HI < rsi_val <= 76:
-        rsi_pts = EE_RSI_MAX_PTS * (1.0 - _lerp(rsi_val, EE_RSI_HI, 76))
+    # RSI zone: peak in [ee_rsi_lo, ee_rsi_hi], decays linearly outside
+    if ee_rsi_lo <= rsi_val <= ee_rsi_hi:
+        rsi_pts = float(ee_rsi_max_pts)
+    elif 42 <= rsi_val < ee_rsi_lo:
+        rsi_pts = ee_rsi_max_pts * _lerp(rsi_val, 42, ee_rsi_lo)
+    elif ee_rsi_hi < rsi_val <= 76:
+        rsi_pts = ee_rsi_max_pts * (1.0 - _lerp(rsi_val, ee_rsi_hi, 76))
     else:
         rsi_pts = 0.0
 
     # EMA20 proximity: the closer to the moving average, the cleaner the entry
-    dist_pct = abs(price - ema20) / ema20 * 100 if ema20 > 0 else EE_EMA_FAR_PCT
-    if dist_pct <= EE_EMA_NEAR_PCT:
-        ema_pts = float(EE_EMA_MAX_PTS)
-    elif dist_pct <= EE_EMA_FAR_PCT:
-        ema_pts = EE_EMA_MAX_PTS * (1.0 - _lerp(dist_pct, EE_EMA_NEAR_PCT, EE_EMA_FAR_PCT))
+    dist_pct = abs(price - ema20) / ema20 * 100 if ema20 > 0 else ee_ema_far
+    if dist_pct <= ee_ema_near:
+        ema_pts = float(ee_ema_max_pts)
+    elif dist_pct <= ee_ema_far:
+        ema_pts = ee_ema_max_pts * (1.0 - _lerp(dist_pct, ee_ema_near, ee_ema_far))
     else:
         ema_pts = 0.0
 
@@ -157,9 +182,9 @@ def _early_entry_score(row: dict, close: pd.Series | None) -> tuple[float, dict]
         hi_20   = float(close.iloc[-20:].max())
         pct_hi  = price / hi_20 if hi_20 > 0 else 0.0
         if pct_hi >= 0.97:      # at or above 20-day high — fresh breakout
-            bob_pts = float(EE_BOB_MAX_PTS)
+            bob_pts = float(ee_bob_max_pts)
         elif pct_hi >= 0.85:
-            bob_pts = EE_BOB_MAX_PTS * _lerp(pct_hi, 0.85, 0.97)
+            bob_pts = ee_bob_max_pts * _lerp(pct_hi, 0.85, 0.97)
 
     total = rsi_pts + ema_pts + bob_pts
     return round(total, 2), {
@@ -169,11 +194,31 @@ def _early_entry_score(row: dict, close: pd.Series | None) -> tuple[float, dict]
     }
 
 
-def _extension_risk_score(row: dict, close: pd.Series | None) -> tuple[float, dict]:
+def _extension_risk_score(
+    row: dict, close: pd.Series | None, *, weights: dict | None = None
+) -> tuple[float, dict]:
     """
     ExtensionRiskScore 0–20 (subtracted). Higher = more dangerous entry.
     RSI overbought (6) + single-day overextension (6) + VWAP distance (5) + 5-day run (3).
+
+    weights: optional dict of constant overrides for research sweeps.
+    Fallback: when close=None, uses row["change_5d"] for the 5-day run penalty
+    if that key is present (it is stored in screener DB results).
     """
+    w = weights or {}
+    er_rsi_warn    = w.get("er_rsi_warn",    ER_RSI_WARN)
+    er_rsi_hard    = w.get("er_rsi_hard",    ER_RSI_HARD)
+    er_rsi_max_pts = w.get("er_rsi_max_pts", ER_RSI_MAX_PTS)
+    er_day_warn    = w.get("er_day_warn",    ER_DAY_WARN)
+    er_day_hard    = w.get("er_day_hard",    ER_DAY_HARD)
+    er_day_max_pts = w.get("er_day_max_pts", ER_DAY_MAX_PTS)
+    er_vwap_warn   = w.get("er_vwap_warn",   ER_VWAP_WARN)
+    er_vwap_hard   = w.get("er_vwap_hard",   ER_VWAP_HARD)
+    er_vwap_max    = w.get("er_vwap_max_pts",ER_VWAP_MAX_PTS)
+    er_5d_warn     = w.get("er_5d_warn",     ER_5D_WARN)
+    er_5d_hard     = w.get("er_5d_hard",     ER_5D_HARD)
+    er_5d_max_pts  = w.get("er_5d_max_pts",  ER_5D_MAX_PTS)
+
     rsi_val    = float(row.get("rsi", 50))
     change_pct = float(row.get("change_pct", 0))
     price      = float(row.get("price", 1))
@@ -181,20 +226,24 @@ def _extension_risk_score(row: dict, close: pd.Series | None) -> tuple[float, di
     atr_val    = float(row.get("atr", 0.01)) or 0.01
 
     # RSI overbought penalty
-    rsi_pen = ER_RSI_MAX_PTS * _lerp(rsi_val, ER_RSI_WARN, ER_RSI_HARD)
+    rsi_pen = er_rsi_max_pts * _lerp(rsi_val, er_rsi_warn, er_rsi_hard)
 
     # Single-day overextension penalty (absolute move)
-    day_pen = ER_DAY_MAX_PTS * _lerp(abs(change_pct), ER_DAY_WARN, ER_DAY_HARD)
+    day_pen = er_day_max_pts * _lerp(abs(change_pct), er_day_warn, er_day_hard)
 
     # VWAP distance penalty in ATR multiples
     vwap_dist = abs(price - vwap) / atr_val
-    vwap_pen  = ER_VWAP_MAX_PTS * _lerp(vwap_dist, ER_VWAP_WARN, ER_VWAP_HARD)
+    vwap_pen  = er_vwap_max * _lerp(vwap_dist, er_vwap_warn, er_vwap_hard)
 
-    # 5-session cumulative run penalty
+    # 5-session cumulative run penalty.
+    # Primary: compute from close series. Fallback: use stored change_5d from DB row.
     run5_pen  = 0.0
     if close is not None and len(close) >= 6:
         change_5d = (float(close.iloc[-1]) / float(close.iloc[-6]) - 1) * 100
-        run5_pen  = ER_5D_MAX_PTS * _lerp(abs(change_5d), ER_5D_WARN, ER_5D_HARD)
+        run5_pen  = er_5d_max_pts * _lerp(abs(change_5d), er_5d_warn, er_5d_hard)
+    elif row.get("change_5d") is not None:
+        change_5d = float(row["change_5d"])
+        run5_pen  = er_5d_max_pts * _lerp(abs(change_5d), er_5d_warn, er_5d_hard)
 
     total = rsi_pen + day_pen + vwap_pen + run5_pen
     return round(_clamp(total, 0, 20), 2), {
@@ -205,23 +254,32 @@ def _extension_risk_score(row: dict, close: pd.Series | None) -> tuple[float, di
     }
 
 
-def _liquidity_score(row: dict, data: pd.DataFrame | None) -> tuple[float, dict]:
+def _liquidity_score(
+    row: dict, data: pd.DataFrame | None, *, weights: dict | None = None
+) -> tuple[float, dict]:
     """
     LiquidityQualityScore 0–15.
     Dollar volume (8) + float/mcap quality tier (4) + volume consistency (3).
     Mid-cap scores highest on quality — cleaner trends, less manipulation risk.
     """
+    w = weights or {}
+    lq_dvol_min     = w.get("lq_dvol_min",     LQ_DVOL_MIN)
+    lq_dvol_full    = w.get("lq_dvol_full",    LQ_DVOL_FULL)
+    lq_dvol_max_pts = w.get("lq_dvol_max_pts", LQ_DVOL_MAX_PTS)
+    lq_qual_max_pts = w.get("lq_qual_max_pts", LQ_QUAL_MAX_PTS)
+    lq_cons_max_pts = w.get("lq_cons_max_pts", LQ_CONS_MAX_PTS)
+
     price      = float(row.get("price", 0))
     market_cap = row.get("market_cap")
 
-    # Dollar volume
+    # Dollar volume — requires OHLCV DataFrame; 0 when data=None (research re-scoring)
     dvol = 0.0
     if data is not None and len(data) > 0:
         dvol = price * float(data["Volume"].iloc[-1])
-    if dvol >= LQ_DVOL_FULL:
-        dvol_pts = float(LQ_DVOL_MAX_PTS)
-    elif dvol >= LQ_DVOL_MIN:
-        dvol_pts = LQ_DVOL_MAX_PTS * _lerp(dvol, LQ_DVOL_MIN, LQ_DVOL_FULL)
+    if dvol >= lq_dvol_full:
+        dvol_pts = float(lq_dvol_max_pts)
+    elif dvol >= lq_dvol_min:
+        dvol_pts = lq_dvol_max_pts * _lerp(dvol, lq_dvol_min, lq_dvol_full)
     else:
         dvol_pts = 0.0
 
@@ -231,7 +289,7 @@ def _liquidity_score(row: dict, data: pd.DataFrame | None) -> tuple[float, dict]
         if market_cap >= 10_000_000_000:    # large cap — valid but not the focus
             qual_pts = 2.0
         elif market_cap >= 2_000_000_000:   # mid cap — cleanest for trend trades
-            qual_pts = float(LQ_QUAL_MAX_PTS)
+            qual_pts = float(lq_qual_max_pts)
         elif market_cap >= 500_000_000:     # small cap — higher risk, bigger moves
             qual_pts = 3.0
         else:                               # micro cap — added risk, thin market
@@ -241,14 +299,14 @@ def _liquidity_score(row: dict, data: pd.DataFrame | None) -> tuple[float, dict]
     else:
         qual_pts = 2.0  # unknown = neutral
 
-    # Volume consistency: low coefficient of variation = consistent participation
+    # Volume consistency — requires OHLCV DataFrame; 0 when data=None (research re-scoring)
     cons_pts = 0.0
     if data is not None and len(data) >= 11:
         vols = data["Volume"].iloc[-11:-1]
         mean = vols.mean()
         if mean > 0:
             cv       = vols.std() / mean
-            cons_pts = LQ_CONS_MAX_PTS * max(0.0, 1.0 - float(cv))
+            cons_pts = lq_cons_max_pts * max(0.0, 1.0 - float(cv))
 
     total = dvol_pts + qual_pts + cons_pts
     return round(_clamp(total, 0, 15), 2), {
@@ -353,6 +411,8 @@ def compute_tradescore(
     row: dict,
     close: pd.Series | None = None,
     data: pd.DataFrame | None = None,
+    *,
+    weights: dict | None = None,
 ) -> dict:
     """
     FinalTradeScore = MomentumScore + EarlyEntryScore + LiquidityScore
@@ -362,21 +422,26 @@ def compute_tradescore(
     Sub-scores are also returned for display and tuning.
 
     Args:
-        row:   screener result dict containing price, rvol, rsi, ema20,
-               ema9, atr, macd, macd_signal, vwap, change_pct, market_cap,
-               float_shares, etc.
-        close: pd.Series of recent close prices (needed for BOB and 5d run).
-        data:  full OHLCV DataFrame (needed for dollar volume and vol consistency).
+        row:     screener result dict containing price, rvol, rsi, ema20,
+                 ema9, atr, macd, macd_signal, vwap, change_pct, market_cap,
+                 float_shares, change_5d (stored in DB), etc.
+        close:   pd.Series of recent close prices (needed for BOB and 5d run).
+                 When None, BOB=0; run5_pen uses row["change_5d"] if present.
+        data:    full OHLCV DataFrame (needed for dollar volume and vol consistency).
+                 When None, dvol_pts=0 and cons_pts=0.
+        weights: optional dict of constant overrides for research parameter sweeps.
+                 Keys are lowercase constant names, e.g. {"ms_rvol_max_pts": 12}.
+                 Unspecified keys use the module-level defaults.
 
     Returns dict with keys:
         score, momentum_score, early_entry, extension_risk, liquidity,
         news_catalyst, direction, setup_type, rationale, change_5d,
         conviction, components
     """
-    ms_val,  ms_det  = _momentum_score(row)
-    ee_val,  ee_det  = _early_entry_score(row, close)
-    er_val,  er_det  = _extension_risk_score(row, close)
-    lq_val,  lq_det  = _liquidity_score(row, data)
+    ms_val,  ms_det  = _momentum_score(row, weights=weights)
+    ee_val,  ee_det  = _early_entry_score(row, close, weights=weights)
+    er_val,  er_det  = _extension_risk_score(row, close, weights=weights)
+    lq_val,  lq_det  = _liquidity_score(row, data, weights=weights)
     nc_val,  nc_det  = _news_catalyst_score(row)
 
     final = round(max(0.0, ms_val + ee_val + lq_val + nc_val - er_val), 1)
@@ -384,6 +449,8 @@ def compute_tradescore(
     change_5d = 0.0
     if close is not None and len(close) >= 6:
         change_5d = round((float(close.iloc[-1]) / float(close.iloc[-6]) - 1) * 100, 2)
+    elif row.get("change_5d") is not None:
+        change_5d = float(row["change_5d"])
 
     change_pct = float(row.get("change_pct", 0))
 

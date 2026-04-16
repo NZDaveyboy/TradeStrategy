@@ -91,6 +91,11 @@ def _fetch_data(ticker: str, signals: list[dict]) -> pd.DataFrame:
     return data[["Open", "High", "Low", "Close", "Volume"]]
 
 
+def fetch_ticker_data(ticker: str, signals: list[dict]) -> pd.DataFrame:
+    """Public wrapper around _fetch_data for use by research sweep pre-caching."""
+    return _fetch_data(ticker, signals)
+
+
 # ---------------------------------------------------------------------------
 # Public interface
 # ---------------------------------------------------------------------------
@@ -99,6 +104,7 @@ def run_backtest(
     ticker: str,
     signals: list[dict],
     *,
+    data: pd.DataFrame | None = None,   # pre-fetched OHLCV; skips yfinance when provided
     cash: float = 10_000,
     commission: float = 0.001,
     max_hold_days: int = 10,
@@ -142,11 +148,12 @@ def run_backtest(
         base["error"] = "no signals"
         return base
 
-    try:
-        data = _fetch_data(ticker, signals)
-    except Exception as exc:
-        base["error"] = f"data fetch failed: {exc}"
-        return base
+    if data is None:
+        try:
+            data = _fetch_data(ticker, signals)
+        except Exception as exc:
+            base["error"] = f"data fetch failed: {exc}"
+            return base
 
     if data.empty or len(data) < 2:
         base["error"] = "insufficient price data"
