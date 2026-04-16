@@ -4,9 +4,11 @@ import os
 import sqlite3
 from datetime import date, datetime
 
+from core.edgar_rss import poll_early_signals
 from core.recommendations import STRATEGY_DISPLAY, build_recommendation
 from core.sec_edgar import get_recent_filings
 from core.setups import compute_trade_setup
+from core.theme_watchlist import is_on_watchlist
 
 import numpy as np
 import pandas as pd
@@ -17,6 +19,24 @@ from providers.yfinance_provider import YFinanceProvider
 _provider = YFinanceProvider()
 
 DB_PATH = os.path.join(os.path.dirname(__file__), "screener.db")
+
+
+@st.cache_data(ttl=120)
+def _fetch_early_signals(tickers_key: tuple[str, ...]) -> list[dict]:
+    """Cached EDGAR RSS poll. Returns list of dicts (EarlySignal fields) for easy serialisation."""
+    signals = poll_early_signals(screener_tickers=list(tickers_key))
+    return [
+        {
+            "ticker":      s.ticker,
+            "company":     s.company,
+            "filing_type": s.filing_type,
+            "filed_at":    s.filed_at.strftime("%Y-%m-%d %H:%M UTC"),
+            "url":         s.url,
+            "match_source": s.match_source,
+        }
+        for s in signals
+    ]
+
 
 st.set_page_config(page_title="TradeStrategy", layout="wide")
 st.title("TradeStrategy")
@@ -449,6 +469,31 @@ with tab_screener:
     if not dates or selected_date is None:
         st.info("No screener data yet. Run `python run.py` first.")
     else:
+        # ── Early Signals panel ───────────────────────────────────
+        with st.expander("⚡ Early Signals — EDGAR filings", expanded=False):
+            _all_conn_es = get_conn()
+            _es_df = pd.read_sql(
+                "SELECT DISTINCT ticker FROM results WHERE run_date = ?",
+                _all_conn_es, params=(selected_date,)
+            )
+            _all_conn_es.close()
+            _screener_tickers = tuple(sorted(_es_df["ticker"].tolist())) if not _es_df.empty else ()
+            _signals = _fetch_early_signals(_screener_tickers)
+            if _signals:
+                _sig_df = pd.DataFrame(_signals)
+                st.dataframe(
+                    _sig_df[["filed_at", "ticker", "filing_type", "company", "match_source", "url"]],
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config={
+                        "url": st.column_config.LinkColumn("Filing"),
+                        "filed_at": st.column_config.TextColumn("Filed (UTC)"),
+                        "match_source": st.column_config.TextColumn("Match"),
+                    },
+                )
+            else:
+                st.caption("No new filings from watchlist or screener universe in the last poll.")
+
         # ── Mode toggle ───────────────────────────────────────────
         mode = st.segmented_control(
             "View mode",
@@ -492,16 +537,20 @@ with tab_screener:
                 except Exception:
                     _conviction = opp.get("setup_type") or "—"
                 with card_cols[i % 4]:
+                    _ticker_label = opp['ticker']
                     st.metric(
-                        label=f"**{opp['ticker']}**",
+                        label=f"**{_ticker_label}**",
                         value=f"{opp[score_col]:.0f}",
                         delta=f"{opp['change_pct']:.2f}%",
                     )
-                    st.caption(
-                        f"{_conviction}  ·  "
-                        f"RVOL {opp.get('rvol', 0):.1f}x  ·  "
-                        f"{opp.get('strategy', '')}"
-                    )
+                    _caption_parts = [
+                        _conviction,
+                        f"RVOL {opp.get('rvol', 0):.1f}x",
+                        opp.get('strategy', ''),
+                    ]
+                    if is_on_watchlist(_ticker_label):
+                        _caption_parts.append("⚡ Theme watchlist")
+                    st.caption("  ·  ".join(p for p in _caption_parts if p))
                     if st.button("Details", key=f"{key_prefix}_{opp['ticker']}_{i}"):
                         show_opportunity_detail(opp.to_dict())
             return True

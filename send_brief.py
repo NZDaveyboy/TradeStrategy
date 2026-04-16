@@ -36,6 +36,7 @@ _load_env()
 
 import requests
 
+from core.theme_watchlist import is_on_watchlist
 from providers.yfinance_provider import YFinanceProvider
 
 _provider = YFinanceProvider()
@@ -275,6 +276,29 @@ def build_brief(rows: list[dict], regime: str, run_date: str) -> str:
     else:
         body = "<i>No actionable short setups today.</i>"
     sections.append(f"<b>SHORT / BEARISH SETUPS</b>\n{body}")
+
+    # Theme watchlist on radar (TradeScore > 50)
+    watchlist_on_radar = [
+        r for r in rows
+        if is_on_watchlist(r.get("ticker", ""))
+        and float(r.get("tradescore") or 0) > 50
+    ]
+    watchlist_on_radar.sort(key=key, reverse=True)
+    if watchlist_on_radar:
+        radar_lines = []
+        for r in watchlist_on_radar[:6]:
+            ts    = int(r.get("tradescore") or 0)
+            rvol  = float(r.get("rvol") or 0)
+            price = float(r.get("price") or 0)
+            chg   = float(r.get("change_pct") or 0)
+            radar_lines.append(
+                f"⚡ <b>{r['ticker']}</b>  Score {ts}  "
+                f"RVOL {rvol:.1f}x  ${price:.2f}  {chg:+.2f}%"
+            )
+        body = "\n".join(radar_lines)
+    else:
+        body = "<i>No theme watchlist tickers above score 50 today.</i>"
+    sections.append(f"<b>⚡ WATCHLIST ON RADAR</b>\n{body}")
 
     # Avoid / low quality
     if avoids:
