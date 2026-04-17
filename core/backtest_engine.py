@@ -159,10 +159,32 @@ def run_backtest(
         base["error"] = "insufficient price data"
         return base
 
-    signal_dates = {
-        s["date"]: {"stop": s.get("stop"), "target": s.get("target")}
-        for s in signals
-    }
+    # Build a set of trading-day strings from the OHLCV index to use as a
+    # calendar.  Signal dates that fall on weekends or market holidays are
+    # advanced to the next available trading day (up to 7 calendar days
+    # forward).  Signals that land entirely outside the OHLCV range are left
+    # unchanged and will not match any bar, so they produce no trade — this
+    # is the existing behaviour and remains correct (e.g. future dates, or
+    # dates before the fetch window).
+    _trading_days: frozenset[str] = frozenset(str(d.date()) for d in data.index)
+
+    def _advance_to_trading_day(date_str: str) -> str:
+        if date_str in _trading_days:
+            return date_str
+        d = pd.Timestamp(date_str)
+        for offset in range(1, 8):
+            candidate = str((d + pd.Timedelta(days=offset)).date())
+            if candidate in _trading_days:
+                return candidate
+        return date_str  # outside OHLCV range — no trade will fire
+
+    signal_dates = {}
+    for s in signals:
+        key = _advance_to_trading_day(s["date"])
+        # If two signals (e.g. Saturday + Sunday) map to the same trading day,
+        # the later one in the list wins.  The strategy only takes one position
+        # at a time so a duplicate key is harmless.
+        signal_dates[key] = {"stop": s.get("stop"), "target": s.get("target")}
 
     try:
         bt = Backtest(
