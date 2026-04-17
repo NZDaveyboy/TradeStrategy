@@ -34,7 +34,14 @@ _SIGNAL_COLS = [
     "macd", "macd_signal", "vwap",
     "market_cap", "float_shares", "tradescore",
     "change_5d", "stop_loss", "setup_type",
+    # Phase 9 faithful re-scoring inputs (NULL for rows pre-dating the migration)
+    "high_20d", "dollar_volume", "vol_cv",
+    # Stored sub-score breakdown — used as test oracle and fidelity reporting
+    "explain",
 ]
+
+# New columns that enable full-fidelity re-scoring.
+_FIDELITY_COLS = ("high_20d", "dollar_volume", "vol_cv")
 
 
 def load_raw_signals(
@@ -186,3 +193,43 @@ def build_signal_groups(df: pd.DataFrame) -> dict[str, list[dict]]:
             "direction":  row.get("rescore_direction"),
         })
     return groups
+
+
+def score_fidelity_report(df: pd.DataFrame) -> dict:
+    """
+    Report how many signals in df have full vs partial re-scoring fidelity.
+
+    A signal is "full" if all three Phase-9 columns are non-NULL:
+        high_20d, dollar_volume, vol_cv
+
+    A signal is "partial" if any of those columns is NULL (old row pre-dating
+    the schema migration).
+
+    Returns:
+        {
+            "n_total":   int,
+            "n_full":    int,
+            "n_partial": int,
+            "by_column": {"high_20d": n_null, "dollar_volume": n_null, "vol_cv": n_null},
+        }
+    """
+    n_total = len(df)
+    by_col: dict[str, int] = {}
+    any_missing = pd.Series([False] * n_total, index=df.index)
+
+    for col in _FIDELITY_COLS:
+        if col in df.columns:
+            null_mask    = df[col].isna()
+            by_col[col]  = int(null_mask.sum())
+            any_missing |= null_mask
+        else:
+            by_col[col] = n_total   # column absent entirely → all partial
+            any_missing[:] = True
+
+    n_partial = int(any_missing.sum())
+    return {
+        "n_total":   n_total,
+        "n_full":    n_total - n_partial,
+        "n_partial": n_partial,
+        "by_column": by_col,
+    }

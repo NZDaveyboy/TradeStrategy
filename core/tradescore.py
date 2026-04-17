@@ -177,10 +177,18 @@ def _early_entry_score(
         ema_pts = 0.0
 
     # Breakout-from-base: is price at or near its 20-session high?
+    # Primary: compute from close series.
+    # Fallback: use stored high_20d from DB row (populated by screener since Phase 9).
+    # If neither is available, bob_pts stays 0 (old rows pre-dating the column).
     bob_pts = 0.0
+    hi_20_src = None
     if close is not None and len(close) >= 20:
-        hi_20   = float(close.iloc[-20:].max())
-        pct_hi  = price / hi_20 if hi_20 > 0 else 0.0
+        hi_20_src = float(close.iloc[-20:].max())
+    elif row.get("high_20d") is not None:
+        hi_20_src = float(row["high_20d"])
+
+    if hi_20_src is not None and hi_20_src > 0:
+        pct_hi = price / hi_20_src
         if pct_hi >= 0.97:      # at or above 20-day high — fresh breakout
             bob_pts = float(ee_bob_max_pts)
         elif pct_hi >= 0.85:
@@ -272,10 +280,14 @@ def _liquidity_score(
     price      = float(row.get("price", 0))
     market_cap = row.get("market_cap")
 
-    # Dollar volume — requires OHLCV DataFrame; 0 when data=None (research re-scoring)
+    # Dollar volume — requires OHLCV DataFrame.
+    # Fallback: use stored dollar_volume from DB row (populated since Phase 9).
+    # If neither is available, dvol stays 0 (old rows pre-dating the column).
     dvol = 0.0
     if data is not None and len(data) > 0:
         dvol = price * float(data["Volume"].iloc[-1])
+    elif row.get("dollar_volume") is not None:
+        dvol = float(row["dollar_volume"])
     if dvol >= lq_dvol_full:
         dvol_pts = float(lq_dvol_max_pts)
     elif dvol >= lq_dvol_min:
@@ -299,7 +311,9 @@ def _liquidity_score(
     else:
         qual_pts = 2.0  # unknown = neutral
 
-    # Volume consistency — requires OHLCV DataFrame; 0 when data=None (research re-scoring)
+    # Volume consistency — requires OHLCV DataFrame.
+    # Fallback: use stored vol_cv (coefficient of variation) from DB row.
+    # If neither is available, cons_pts stays 0 (old rows pre-dating the column).
     cons_pts = 0.0
     if data is not None and len(data) >= 11:
         vols = data["Volume"].iloc[-11:-1]
@@ -307,6 +321,9 @@ def _liquidity_score(
         if mean > 0:
             cv       = vols.std() / mean
             cons_pts = lq_cons_max_pts * max(0.0, 1.0 - float(cv))
+    elif row.get("vol_cv") is not None:
+        cv       = float(row["vol_cv"])
+        cons_pts = lq_cons_max_pts * max(0.0, 1.0 - cv)
 
     total = dvol_pts + qual_pts + cons_pts
     return round(_clamp(total, 0, 15), 2), {

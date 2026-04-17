@@ -101,14 +101,18 @@ def init_db():
     """)
     # Migrate existing DBs that pre-date new columns
     for col, col_type in [
-        ("market_cap",  "REAL"),
-        ("float_shares","REAL"),
-        ("tradescore",  "REAL"),
-        ("explain",     "TEXT"),
-        ("setup_type",  "TEXT"),
-        ("rationale",   "TEXT"),
-        ("change_5d",   "REAL"),
-        ("direction",   "TEXT"),
+        ("market_cap",    "REAL"),
+        ("float_shares",  "REAL"),
+        ("tradescore",    "REAL"),
+        ("explain",       "TEXT"),
+        ("setup_type",    "TEXT"),
+        ("rationale",     "TEXT"),
+        ("change_5d",     "REAL"),
+        ("direction",     "TEXT"),
+        # Phase 9 — faithful re-scoring inputs
+        ("high_20d",      "REAL"),   # 20-session closing high (for BOB)
+        ("dollar_volume", "REAL"),   # price × last-bar volume (for dvol)
+        ("vol_cv",        "REAL"),   # volume coefficient of variation prior 10 bars
     ]:
         try:
             conn.execute(f"ALTER TABLE results ADD COLUMN {col} {col_type}")
@@ -123,8 +127,21 @@ def save_results(run_date: str, rows: list[dict]):
     for r in rows:
         conn.execute(
             """
-            INSERT OR REPLACE INTO results VALUES
-            (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            INSERT OR REPLACE INTO results (
+                run_date, ticker, strategy, asset,
+                price, change_pct, rvol,
+                ema9, ema20, ema200,
+                rsi, atr, stop_loss,
+                macd, macd_signal, vwap,
+                volume_trend_up, score,
+                market_cap, float_shares,
+                tradescore, explain,
+                setup_type, rationale,
+                change_5d, direction,
+                high_20d, dollar_volume, vol_cv
+            ) VALUES (
+                ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?
+            )
             """,
             (
                 run_date, r["ticker"], r["strategy"], r["asset"],
@@ -137,6 +154,7 @@ def save_results(run_date: str, rows: list[dict]):
                 r.get("tradescore"), r.get("explain"),
                 r.get("setup_type"), r.get("rationale"),
                 r.get("change_5d"), r.get("direction"),
+                r.get("high_20d"), r.get("dollar_volume"), r.get("vol_cv"),
             ),
         )
     conn.commit()
@@ -314,6 +332,18 @@ def screen_ticker(ticker: str, strategy: str) -> dict | None:
         "market_cap":      market_cap,
         "float_shares":    float_shares,
     }
+
+    # Compute faithful re-scoring inputs before calling compute_tradescore.
+    # These are stored so research sweeps can reconstruct exact sub-scores
+    # without needing the original close series or OHLCV DataFrame.
+    row["high_20d"] = round(float(close.iloc[-20:].max()), 6) if len(close) >= 20 else None
+
+    _last_vol   = float(data["Volume"].iloc[-1])
+    row["dollar_volume"] = round(price * _last_vol, 2)
+
+    _vol_window = data["Volume"].iloc[-11:-1]
+    _vol_mean   = float(_vol_window.mean())
+    row["vol_cv"] = round(float(_vol_window.std() / _vol_mean), 6) if len(_vol_window) >= 10 and _vol_mean > 0 else None
 
     ts = compute_tradescore(row, close=close, data=data)
     row["tradescore"] = ts["score"]

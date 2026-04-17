@@ -33,6 +33,7 @@ from core.research.rescore import (
     filter_signals,
     load_raw_signals,
     rescore_signals,
+    score_fidelity_report,
 )
 from core.research.storage import DB_PATH, save_run
 
@@ -285,6 +286,17 @@ def run_sweep(
              "max_drawdown": None, "return_pct": None, "ticker_results": []}
             for p in param_sets
         ]
+
+    # Report scoring fidelity once per sweep (printed to stdout so caller sees it).
+    fidelity = score_fidelity_report(raw_df)
+    print(
+        f"  Scoring fidelity: {fidelity['n_full']}/{fidelity['n_total']} full "
+        f"({fidelity['n_partial']} partial — missing stored inputs)"
+    )
+    if fidelity["n_partial"] > 0:
+        for col, n_null in fidelity["by_column"].items():
+            if n_null > 0:
+                print(f"    {col}: {n_null} NULL")
 
     # Build full signal groups for pre-caching (use default params — we just need dates)
     from core.research.params import SweepParams as _SP
