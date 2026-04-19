@@ -149,14 +149,16 @@ def fetch_prices(tickers: tuple) -> dict:
 # Screener data (must exist before tabs so sidebar can read it)
 # ---------------------------------------------------------------------------
 
-screener_ready = os.path.exists(DB_PATH)
 dates = []
-if screener_ready:
+try:
     conn = get_conn()
     dates = pd.read_sql(
         "SELECT DISTINCT run_date FROM results ORDER BY run_date DESC", conn
     )["run_date"].tolist()
     conn.close()
+except Exception:
+    pass  # results table doesn't exist yet — fresh deploy or empty DB
+screener_ready = bool(dates)
 
 # ---------------------------------------------------------------------------
 # Sidebar — screener filters only
