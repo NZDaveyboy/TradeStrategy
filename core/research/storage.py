@@ -16,6 +16,8 @@ import sqlite3
 from contextlib import contextmanager
 from typing import Generator
 
+from core.db import get_connection, sync_if_turso
+
 import pandas as pd
 
 DB_PATH = os.path.join(os.path.dirname(__file__), "..", "..", "screener.db")
@@ -60,11 +62,13 @@ CREATE TABLE IF NOT EXISTS research_results (
 
 @contextmanager
 def _connect(db_path: str = DB_PATH) -> Generator[sqlite3.Connection, None, None]:
-    conn = sqlite3.connect(db_path)
-    conn.execute("PRAGMA journal_mode=WAL")
+    conn = get_connection(db_path)
+    if not getattr(conn, "sync", None):  # WAL only for local SQLite; Turso manages its own
+        conn.execute("PRAGMA journal_mode=WAL")
     try:
         yield conn
         conn.commit()
+        sync_if_turso(conn)
     finally:
         conn.close()
 
@@ -177,8 +181,11 @@ def load_runs(
     where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
     sql   = f"SELECT * FROM research_runs {where} ORDER BY run_id"
 
-    with sqlite3.connect(db_path) as conn:
+    conn = get_connection(db_path)
+    try:
         return pd.read_sql(sql, conn, params=params)
+    finally:
+        conn.close()
 
 
 def load_ticker_results(db_path: str = DB_PATH, run_id: int | None = None) -> pd.DataFrame:
@@ -192,5 +199,8 @@ def load_ticker_results(db_path: str = DB_PATH, run_id: int | None = None) -> pd
     params = [run_id] if run_id is not None else []
     sql    = f"SELECT * FROM research_results {where} ORDER BY id"
 
-    with sqlite3.connect(db_path) as conn:
+    conn = get_connection(db_path)
+    try:
         return pd.read_sql(sql, conn, params=params)
+    finally:
+        conn.close()

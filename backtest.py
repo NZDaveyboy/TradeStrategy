@@ -17,8 +17,9 @@ in the Backtest tab of the Streamlit app.
 """
 
 import os
-import sqlite3
 import time
+
+from core.db import get_connection, sync_if_turso
 from datetime import datetime, timedelta
 
 import pandas as pd
@@ -37,7 +38,7 @@ FORWARD_DAYS = [1, 3, 5, 10]
 # ---------------------------------------------------------------------------
 
 def init_backtest_table():
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_connection(DB_PATH)
     conn.execute("""
         CREATE TABLE IF NOT EXISTS backtest (
             run_date    TEXT,
@@ -60,11 +61,12 @@ def init_backtest_table():
         )
     """)
     conn.commit()
+    sync_if_turso(conn)
     conn.close()
 
 
 def load_screener_results() -> pd.DataFrame:
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_connection(DB_PATH)
     df = pd.read_sql(
         "SELECT run_date, ticker, strategy, asset, score, change_pct, rvol, price "
         "FROM results ORDER BY run_date",
@@ -75,7 +77,7 @@ def load_screener_results() -> pd.DataFrame:
 
 
 def already_processed(run_date: str, ticker: str) -> bool:
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_connection(DB_PATH)
     row = conn.execute(
         "SELECT 1 FROM backtest WHERE run_date = ? AND ticker = ?",
         (run_date, ticker),
@@ -85,7 +87,7 @@ def already_processed(run_date: str, ticker: str) -> bool:
 
 
 def save_backtest_row(row: dict):
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_connection(DB_PATH)
     conn.execute(
         """
         INSERT OR REPLACE INTO backtest VALUES
@@ -101,6 +103,7 @@ def save_backtest_row(row: dict):
         ),
     )
     conn.commit()
+    sync_if_turso(conn)
     conn.close()
 
 
@@ -205,7 +208,7 @@ def main():
     print(f"\nDone. {processed} new entries processed, {skipped} already up to date.")
 
     # Quick summary
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_connection(DB_PATH)
     summary = pd.read_sql(
         """
         SELECT score,

@@ -23,8 +23,9 @@ Run after each session alongside backtest.py.
 
 import math
 import os
-import sqlite3
 import time
+
+from core.db import get_connection, sync_if_turso
 
 import numpy as np
 import pandas as pd
@@ -121,7 +122,7 @@ def forward_closes(ticker: str, run_date: str) -> dict:
 # ---------------------------------------------------------------------------
 
 def init_table():
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_connection(DB_PATH)
     conn.execute("""
         CREATE TABLE IF NOT EXISTS backtest_options (
             run_date        TEXT,
@@ -145,11 +146,12 @@ def init_table():
         )
     """)
     conn.commit()
+    sync_if_turso(conn)
     conn.close()
 
 
 def already_done(run_date, ticker, strategy_name) -> bool:
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_connection(DB_PATH)
     row = conn.execute(
         "SELECT 1 FROM backtest_options WHERE run_date=? AND ticker=? AND strategy_name=?",
         (run_date, ticker, strategy_name),
@@ -159,7 +161,7 @@ def already_done(run_date, ticker, strategy_name) -> bool:
 
 
 def save_row(r: dict):
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_connection(DB_PATH)
     conn.execute("""
         INSERT OR REPLACE INTO backtest_options VALUES
         (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
@@ -176,6 +178,7 @@ def save_row(r: dict):
         r.get("return_5d"),     r.get("return_10d"),
     ))
     conn.commit()
+    sync_if_turso(conn)
     conn.close()
 
 
@@ -186,7 +189,7 @@ def save_row(r: dict):
 def main():
     init_table()
 
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_connection(DB_PATH)
     screener = pd.read_sql(
         "SELECT run_date, ticker, strategy, asset, score, price FROM results "
         "WHERE asset = 'equity' ORDER BY run_date",
@@ -274,7 +277,7 @@ def main():
     print(f"\nDone. {processed} new, {skipped} skipped, {errors} skipped (zero price).")
 
     # Summary
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_connection(DB_PATH)
     summary = pd.read_sql("""
         SELECT strategy_name, screener_score AS score,
                COUNT(*)                               AS trades,

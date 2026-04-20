@@ -23,8 +23,9 @@ backtest.py is kept intact until v2 is confirmed working.
 import argparse
 import math
 import os
-import sqlite3
 import time
+
+from core.db import get_connection, sync_if_turso
 from datetime import datetime, timezone
 
 import pandas as pd
@@ -39,7 +40,7 @@ DB_PATH = os.path.join(os.path.dirname(__file__), "screener.db")
 # ---------------------------------------------------------------------------
 
 def init_table():
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_connection(DB_PATH)
     conn.execute("""
         CREATE TABLE IF NOT EXISTS backtest_v2 (
             ticker          TEXT PRIMARY KEY,
@@ -57,6 +58,7 @@ def init_table():
         )
     """)
     conn.commit()
+    sync_if_turso(conn)
     conn.close()
 
 
@@ -65,7 +67,7 @@ def _nan_to_none(v: float) -> float | None:
 
 
 def save_result(r: dict, commission: float, max_hold_days: int):
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_connection(DB_PATH)
     conn.execute(
         "INSERT OR REPLACE INTO backtest_v2 VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
         (
@@ -84,6 +86,7 @@ def save_result(r: dict, commission: float, max_hold_days: int):
         ),
     )
     conn.commit()
+    sync_if_turso(conn)
     conn.close()
 
 
@@ -100,7 +103,7 @@ def load_signals() -> dict[str, list[dict]]:
     if not os.path.exists(DB_PATH):
         return {}
 
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_connection(DB_PATH)
     df = pd.read_sql(
         """
         SELECT run_date, ticker, price, stop_loss, direction, tradescore, setup_type

@@ -4,6 +4,7 @@ numpy
 beautifulsoup4
 requests
 streamlit
+libsql-experimental
 
 # Phase 7 — backtesting engine
 backtesting @ git+https://github.com/NZDaveyboy/backtesting.py

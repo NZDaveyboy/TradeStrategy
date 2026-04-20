@@ -1,0 +1,54 @@
+name: Test Screener in Actions
+
+# Diagnostic workflow — does run.py complete cleanly on GitHub Actions runners?
+# Specifically: does yfinance get blocked or throttled?
+#
+# Nothing is persisted. screener.db is written to the runner's tmp filesystem
+# and evaporates when the job ends.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-22.04
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run screener
+        run: python run.py
+
+      - name: Row count in screener.db
+        if: always()
+        run: |
+          python - <<'EOF'
+          import sqlite3, os, sys
+          db = os.path.join(os.path.dirname(os.path.abspath(".")), "screener.db")
+          db = "screener.db"
+          if not os.path.exists(db):
+              print("screener.db not found — run.py may have failed before init_db()")
+              sys.exit(0)
+          conn = sqlite3.connect(db)
+          total = conn.execute("SELECT COUNT(*) FROM results").fetchone()[0]
+          today = conn.execute(
+              "SELECT COUNT(*) FROM results ORDER BY run_date DESC LIMIT 1"
+          )
+          run_dates = conn.execute(
+              "SELECT run_date, COUNT(*) FROM results GROUP BY run_date ORDER BY run_date DESC LIMIT 5"
+          ).fetchall()
+          conn.close()
+          print(f"\n--- screener.db row count ---")
+          print(f"Total rows (all dates): {total}")
+          print(f"Rows by run_date (most recent first):")
+          for date, count in run_dates:
+              print(f"  {date}: {count} rows")
+          EOF

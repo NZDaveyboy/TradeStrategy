@@ -15,8 +15,9 @@ Cron example (9am ET, Mon-Fri):
 import json
 import math
 import os
-import sqlite3
 from datetime import datetime, timezone
+
+from core.db import get_connection, sync_if_turso
 
 import pandas as pd
 
@@ -67,7 +68,7 @@ FILTER_MAX_RSI    = 75.0
 # ---------------------------------------------------------------------------
 
 def init_db():
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_connection(DB_PATH)
     conn.execute("""
         CREATE TABLE IF NOT EXISTS results (
             run_date         TEXT,
@@ -119,11 +120,12 @@ def init_db():
         except Exception:
             pass  # column already exists
     conn.commit()
+    sync_if_turso(conn)
     conn.close()
 
 
 def save_results(run_date: str, rows: list[dict]):
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_connection(DB_PATH)
     for r in rows:
         conn.execute(
             """
@@ -158,6 +160,7 @@ def save_results(run_date: str, rows: list[dict]):
             ),
         )
     conn.commit()
+    sync_if_turso(conn)
     conn.close()
 
 

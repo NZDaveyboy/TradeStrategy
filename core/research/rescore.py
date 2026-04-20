@@ -17,7 +17,7 @@ Threshold values calibrated on full screener scores need adjusting:
 from __future__ import annotations
 
 import os
-import sqlite3
+from core.db import get_connection
 
 import pandas as pd
 
@@ -77,7 +77,7 @@ def load_raw_signals(
     cols  = ", ".join(c for c in _SIGNAL_COLS if c != "stop_loss") + ", stop_loss"
     sql   = f"SELECT {cols} FROM results WHERE {where} ORDER BY run_date, ticker"
 
-    conn = sqlite3.connect(db_path)
+    conn = get_connection(db_path)
     df   = pd.read_sql(sql, conn, params=params)
     conn.close()
     return df

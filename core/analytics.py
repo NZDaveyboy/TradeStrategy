@@ -14,9 +14,10 @@ from __future__ import annotations
 
 import math
 import os
-import sqlite3
 
 import pandas as pd
+
+from core.db import get_connection
 import quantstats as qs
 
 DB_PATH = os.path.join(os.path.dirname(__file__), "..", "screener.db")
@@ -42,7 +43,7 @@ def load_v2_data(db_path: str = DB_PATH) -> pd.DataFrame:
     if not os.path.exists(db_path):
         return pd.DataFrame()
 
-    conn = sqlite3.connect(db_path)
+    conn = get_connection(db_path)
     try:
         exists = conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name='backtest_v2'"

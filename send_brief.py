@@ -15,8 +15,9 @@ Can also be imported and called from run.py:
 
 import json
 import os
-import sqlite3
 from datetime import datetime, timezone
+
+from core.db import get_connection, sync_if_turso
 
 # ---------------------------------------------------------------------------
 # Load .env (same pattern as scan_premarket.py)
@@ -100,7 +101,7 @@ def _load_today(run_date: str) -> list[dict]:
     if not os.path.exists(DB_PATH):
         return []
     try:
-        conn = sqlite3.connect(DB_PATH)
+        conn = get_connection(DB_PATH)
         # Ensure newer columns exist (safe no-op if already present)
         for col, col_type in [
             ("tradescore",  "REAL"),
@@ -114,8 +115,8 @@ def _load_today(run_date: str) -> list[dict]:
             except Exception:
                 pass
         conn.commit()
-        conn.row_factory = sqlite3.Row
-        rows = conn.execute(
+        sync_if_turso(conn)
+        cursor = conn.execute(
             """
             SELECT ticker, price, change_pct, rvol, rsi, atr, vwap,
                    ema9, ema20, tradescore, explain, setup_type, rationale,
@@ -125,9 +126,11 @@ def _load_today(run_date: str) -> list[dict]:
             ORDER BY tradescore DESC
             """,
             (run_date,),
-        ).fetchall()
+        )
+        columns = [d[0] for d in cursor.description]
+        rows = [dict(zip(columns, row)) for row in cursor.fetchall()]
         conn.close()
-        return [dict(r) for r in rows]
+        return rows
     except Exception as e:
         print(f"DB read error: {e}")
         return []

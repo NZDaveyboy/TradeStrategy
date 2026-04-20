@@ -1,9 +1,9 @@
 import json
 import math
 import os
-import sqlite3
 from datetime import date, datetime
 
+from core.db import get_connection, sync_if_turso
 from core.edgar_rss import poll_early_signals
 from core.recommendations import STRATEGY_DISPLAY, build_recommendation
 from core.sec_edgar import get_recent_filings
@@ -46,8 +46,17 @@ st.title("TradeStrategy")
 # Database helpers
 # ---------------------------------------------------------------------------
 
+@st.cache_resource
+def _sync_db_once():
+    """Pull latest from Turso once per Streamlit worker process. No-op for local SQLite."""
+    conn = get_connection(DB_PATH)
+    sync_if_turso(conn)
+    conn.close()
+
+
 def get_conn():
-    return sqlite3.connect(DB_PATH)
+    _sync_db_once()
+    return get_connection(DB_PATH)
 
 
 def init_tracker_tables():
@@ -89,7 +98,31 @@ def init_tracker_tables():
             gap_pct      REAL
         )
     """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS metal_holdings (
+            id                INTEGER PRIMARY KEY AUTOINCREMENT,
+            metal             TEXT    NOT NULL,
+            holding_type      TEXT    NOT NULL DEFAULT 'physical',
+            quantity          REAL    NOT NULL,
+            avg_buy_price_nzd REAL    NOT NULL,
+            notes             TEXT    DEFAULT ''
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS portfolios (
+            id                INTEGER PRIMARY KEY AUTOINCREMENT,
+            portfolio_type    TEXT    NOT NULL,
+            ticker            TEXT    NOT NULL,
+            asset_class       TEXT    NOT NULL,
+            quantity          REAL    NOT NULL,
+            avg_buy_price_nzd REAL    NOT NULL,
+            thesis            TEXT    DEFAULT '',
+            notes             TEXT    DEFAULT '',
+            added_date        TEXT    NOT NULL
+        )
+    """)
     conn.commit()
+    sync_if_turso(conn)
     conn.close()
 
 
@@ -149,15 +182,20 @@ def fetch_prices(tickers: tuple) -> dict:
 # Screener data (must exist before tabs so sidebar can read it)
 # ---------------------------------------------------------------------------
 
-dates = []
-try:
-    conn = get_conn()
-    dates = pd.read_sql(
-        "SELECT DISTINCT run_date FROM results ORDER BY run_date DESC", conn
-    )["run_date"].tolist()
-    conn.close()
-except Exception:
-    pass  # results table doesn't exist yet — fresh deploy or empty DB
+@st.cache_data(ttl=300)
+def _load_dates() -> list[str]:
+    try:
+        conn = get_conn()
+        result = pd.read_sql(
+            "SELECT DISTINCT run_date FROM results ORDER BY run_date DESC", conn
+        )["run_date"].tolist()
+        conn.close()
+        return result
+    except Exception:
+        return []  # results table doesn't exist yet — fresh deploy or empty DB
+
+
+dates = _load_dates()
 screener_ready = bool(dates)
 
 # ---------------------------------------------------------------------------
@@ -276,7 +314,7 @@ with st.sidebar:
 # Tabs
 # ---------------------------------------------------------------------------
 
-tab_screener, tab_tracker, tab_alerts, tab_backtest, tab_advice, tab_options, tab_learn = st.tabs(["Screener", "Trade Tracker", "Alerts", "Backtest", "Advice", "Options", "Learn"])
+tab_screener, tab_tracker, tab_alerts, tab_backtest, tab_advice, tab_options, tab_learn, tab_metals, tab_portfolio = st.tabs(["Screener", "Trade Tracker", "Alerts", "Backtest", "Advice", "Options", "Learn", "Metals", "Portfolio"])
 
 
 # ---------------------------------------------------------------------------
@@ -829,6 +867,7 @@ with tab_tracker:
                          entry_price, shares_calc, position_nzd, notes_in),
                     )
                     conn.commit()
+                    sync_if_turso(conn)
                     conn.close()
                     st.success(f"Added {ticker_in} — {shares_calc:.4f} shares @ ${entry_price:.4f}")
                     st.cache_data.clear()
@@ -865,6 +904,7 @@ with tab_tracker:
                 conn = get_conn()
                 conn.execute("UPDATE trades SET is_open = 0 WHERE id = ?", (selected_id,))
                 conn.commit()
+                sync_if_turso(conn)
                 conn.close()
                 st.cache_data.clear()
                 st.rerun()
@@ -873,6 +913,7 @@ with tab_tracker:
                 conn = get_conn()
                 conn.execute("DELETE FROM trades WHERE id = ?", (selected_id,))
                 conn.commit()
+                sync_if_turso(conn)
                 conn.close()
                 st.cache_data.clear()
                 st.rerun()
@@ -908,6 +949,7 @@ with tab_tracker:
                         (coin_in, amount_in, avg_buy_nzd_in, crypto_notes),
                     )
                     conn.commit()
+                    sync_if_turso(conn)
                     conn.close()
                     st.success(f"Added {amount_in} {coin_in}")
                     st.cache_data.clear()
@@ -942,6 +984,7 @@ with tab_tracker:
                 conn = get_conn()
                 conn.execute("DELETE FROM crypto_holdings WHERE id = ?", (selected_id_c,))
                 conn.commit()
+                sync_if_turso(conn)
                 conn.close()
                 st.cache_data.clear()
                 st.rerun()
@@ -2934,3 +2977,1044 @@ Options let you act on that signal with less capital at risk than buying shares 
 
 That's the edge. Build it slowly.
 """)
+
+
+# ===========================================================================
+# Shared market-context helpers (used by Metals + Portfolio tabs)
+# ===========================================================================
+
+_METAL_FUTURES = {
+    "Gold":      "GC=F",
+    "Silver":    "SI=F",
+    "Platinum":  "PL=F",
+    "Palladium": "PA=F",
+}
+_METAL_FUTURES_REV = {v: k for k, v in _METAL_FUTURES.items()}
+
+_METAL_ETFS = {
+    "GLD":  "SPDR Gold ETF",
+    "SLV":  "iShares Silver ETF",
+    "GDX":  "VanEck Gold Miners",
+    "GDXJ": "VanEck Jr Gold Miners",
+}
+
+_ALL_METAL_TICKERS = list(_METAL_FUTURES.values()) + list(_METAL_ETFS.keys())
+
+# Driver tags for portfolio themes
+_ASSET_DRIVERS = {
+    "GC=F":   ("Safe haven", "Inflation hedge", "USD inverse"),
+    "SI=F":   ("Industrial demand", "Monetary hedge", "EV/solar input"),
+    "PL=F":   ("Auto catalyst", "Industrial", "Supply constrained"),
+    "PA=F":   ("Auto catalyst", "Industrial", "Supply constrained"),
+    "GLD":    ("Safe haven", "Inflation hedge"),
+    "SLV":    ("Industrial demand", "Monetary hedge"),
+    "GDX":    ("Levered gold play", "Mining equity", "Operational leverage"),
+    "GDXJ":   ("Junior miners", "High beta to gold", "Exploration upside"),
+    "BTC-USD":("Digital store of value", "Risk-on crypto", "Institutional adoption"),
+    "ETH-USD":("Smart contract platform", "DeFi infrastructure", "Risk-on crypto"),
+}
+
+
+@st.cache_data(ttl=300)
+def fetch_metal_prices() -> dict:
+    result = {}
+    for ticker in _ALL_METAL_TICKERS:
+        try:
+            q = _provider.get_quote(ticker)
+            result[ticker] = {"price": q.last_price or 0.0, "prev_close": q.prev_close or 0.0}
+        except Exception:
+            result[ticker] = {"price": 0.0, "prev_close": 0.0}
+    return result
+
+
+@st.cache_data(ttl=3600)
+def fetch_metal_chart(ticker: str) -> pd.DataFrame:
+    try:
+        return _provider.get_ohlcv(ticker, "1y", "1d")
+    except Exception:
+        return pd.DataFrame()
+
+
+@st.cache_data(ttl=3600)
+def fetch_metal_technicals() -> dict:
+    """EMA trends, momentum, and signal for each metal future."""
+    result = {}
+    for name, ticker in _METAL_FUTURES.items():
+        try:
+            df = _provider.get_ohlcv(ticker, "1y", "1d")
+            if len(df) < 50:
+                continue
+            close = df["Close"]
+            price  = float(close.iloc[-1])
+            ema20  = float(close.ewm(span=20, adjust=False).mean().iloc[-1])
+            ema50  = float(close.ewm(span=50, adjust=False).mean().iloc[-1])
+            ema200 = float(close.ewm(span=200, adjust=False).mean().iloc[-1]) if len(close) >= 200 else None
+            mom_5d  = (price / float(close.iloc[-6])  - 1) * 100 if len(close) >= 6  else None
+            mom_20d = (price / float(close.iloc[-21]) - 1) * 100 if len(close) >= 21 else None
+            hi_52   = float(df["High"].max()) if "High" in df.columns else price
+            lo_52   = float(df["Low"].min())  if "Low"  in df.columns else price
+            pct_from_hi = (price / hi_52 - 1) * 100
+
+            above_ema20 = price > ema20
+            above_ema50 = price > ema50
+            above_ema200 = (price > ema200) if ema200 else None
+
+            if above_ema20 and above_ema50:
+                trend  = "Uptrend"
+                signal = "Bullish"
+            elif above_ema20 and not above_ema50:
+                trend  = "Recovering"
+                signal = "Neutral"
+            elif not above_ema20 and above_ema50:
+                trend  = "Pulling back"
+                signal = "Watch"
+            else:
+                trend  = "Downtrend"
+                signal = "Bearish"
+
+            result[name] = {
+                "ticker": ticker, "price": price,
+                "ema20": ema20, "ema50": ema50, "ema200": ema200,
+                "trend": trend, "signal": signal,
+                "mom_5d": mom_5d, "mom_20d": mom_20d,
+                "hi_52": hi_52, "lo_52": lo_52, "pct_from_hi": pct_from_hi,
+            }
+        except Exception:
+            pass
+    return result
+
+
+@st.cache_data(ttl=300)
+def fetch_market_context() -> dict:
+    """
+    Derive macro regime signals from live price data.
+    Used by both Metals and Portfolio tabs.
+    """
+    ctx: dict = {}
+
+    for label, ticker, span in [
+        ("spy",  "SPY",     "3mo"),
+        ("btc",  "BTC-USD", "3mo"),
+        ("usd",  "UUP",     "3mo"),   # USD Bullish ETF proxy for DXY
+        ("tnx",  "^TNX",    "3mo"),   # 10-year yield
+    ]:
+        try:
+            df    = _provider.get_ohlcv(ticker, span, "1d")
+            close = df["Close"]
+            price = float(close.iloc[-1])
+            ema20 = float(close.ewm(span=20, adjust=False).mean().iloc[-1])
+            ema50 = float(close.ewm(span=50, adjust=False).mean().iloc[-1])
+            prev  = float(close.iloc[-2]) if len(close) >= 2 else price
+            chg   = (price / prev - 1) * 100
+            mom_5d = (price / float(close.iloc[-6]) - 1) * 100 if len(close) >= 6 else None
+            ctx[label] = {
+                "price": price, "ema20": ema20, "ema50": ema50,
+                "chg": chg, "mom_5d": mom_5d,
+                "above_ema20": price > ema20,
+                "above_ema50": price > ema50,
+            }
+        except Exception:
+            ctx[label] = {}
+
+    return ctx
+
+
+def _regime_label(ctx: dict, key: str) -> str:
+    d = ctx.get(key, {})
+    if not d:
+        return "—"
+    if d.get("above_ema20") and d.get("above_ema50"):
+        return "Bullish"
+    if d.get("above_ema20"):
+        return "Recovering"
+    if d.get("above_ema50"):
+        return "Pulling back"
+    return "Bearish"
+
+
+def _driver_tags(ticker: str, screener_row: dict | None = None) -> list[str]:
+    """Return macro/thematic driver tags for a ticker."""
+    if ticker in _ASSET_DRIVERS:
+        return list(_ASSET_DRIVERS[ticker])
+    if ticker.endswith("-USD"):
+        return ["Digital asset", "Risk-on crypto"]
+    # Equity — derive from screener data if available
+    tags = []
+    if screener_row:
+        ts = screener_row.get("tradescore", 0) or 0
+        direction = screener_row.get("direction", "")
+        setup = screener_row.get("setup_type", "")
+        if ts >= 50:
+            tags.append("High conviction")
+        if "momentum" in str(setup).lower():
+            tags.append("Momentum breakout")
+        if "weakness" in str(setup).lower():
+            tags.append("Breakdown / short setup")
+        if direction == "long":
+            tags.append("Bullish trend")
+        elif direction == "short":
+            tags.append("Bearish trend")
+    return tags or ["Equity"]
+
+
+# ===========================================================================
+# TAB 8 — Metals
+# ===========================================================================
+
+
+with tab_metals:
+
+    nzdusd_m  = fetch_nzdusd()
+    metal_px  = fetch_metal_prices()
+    metal_tech = fetch_metal_technicals()
+    mctx      = fetch_market_context()
+
+    # -----------------------------------------------------------------------
+    # Macro drivers banner
+    # -----------------------------------------------------------------------
+
+    spy_regime = _regime_label(mctx, "spy")
+    usd_regime = _regime_label(mctx, "usd")
+    gold_signal = metal_tech.get("Gold", {}).get("signal", "—")
+    gold_mom5   = metal_tech.get("Gold", {}).get("mom_5d")
+
+    # Derive narrative
+    usd_d = mctx.get("usd", {})
+    usd_falling = usd_d.get("above_ema20") is False  # USD below EMA20 = tailwind for metals
+
+    drivers = []
+    if usd_falling:
+        drivers.append("USD weakening — metals benefit from inverse dollar relationship")
+    elif usd_d.get("above_ema20") and usd_d.get("above_ema50"):
+        drivers.append("USD strengthening — headwind for USD-denominated metals")
+    if gold_signal == "Bullish":
+        drivers.append("Gold in uptrend — safe haven / inflation hedge demand active")
+    elif gold_signal == "Bearish":
+        drivers.append("Gold in downtrend — risk-on environment reducing safe haven demand")
+    if spy_regime in ("Bullish", "Recovering"):
+        drivers.append("Equity market bullish — watch for rotation out of safe havens into equities")
+    else:
+        drivers.append("Equity market under pressure — flight to quality supporting metals")
+
+    tnx_d = mctx.get("tnx", {})
+    if tnx_d.get("above_ema20"):
+        drivers.append("Rates rising — pressure on non-yielding metals; watch real rate moves")
+    else:
+        drivers.append("Rates easing — supportive for gold as opportunity cost of holding declines")
+
+    gs_ratio = None
+    g_p = metal_px.get("GC=F", {}).get("price", 0)
+    s_p = metal_px.get("SI=F", {}).get("price", 0)
+    if g_p and s_p:
+        gs_ratio = g_p / s_p
+        if gs_ratio > 80:
+            drivers.append(f"Gold/Silver ratio {gs_ratio:.0f} — historically elevated; silver historically cheap vs gold")
+        elif gs_ratio < 60:
+            drivers.append(f"Gold/Silver ratio {gs_ratio:.0f} — silver expensive vs gold historically")
+        else:
+            drivers.append(f"Gold/Silver ratio {gs_ratio:.0f} — within normal historical range (~60–80)")
+
+    # Miners vs gold
+    gdx_p  = metal_px.get("GDX",  {}).get("price", 0)
+    gdx_pc = metal_px.get("GDX",  {}).get("prev_close", 0)
+    gld_p  = metal_px.get("GLD",  {}).get("price", 0)
+    gld_pc = metal_px.get("GLD",  {}).get("prev_close", 0)
+    if gdx_p and gdx_pc and gld_p and gld_pc:
+        gdx_chg = (gdx_p / gdx_pc - 1) * 100
+        gld_chg = (gld_p / gld_pc - 1) * 100
+        if gdx_chg > gld_chg + 0.5:
+            drivers.append("Miners outperforming gold today — risk appetite within metals sector, levered upside in play")
+        elif gdx_chg < gld_chg - 0.5:
+            drivers.append("Miners underperforming gold today — investors preferring physical over operational leverage")
+
+    with st.container(border=True):
+        st.markdown("**Market drivers**")
+        for d in drivers:
+            st.markdown(f"- {d}")
+        col_regime1, col_regime2, col_regime3, col_regime4 = st.columns(4)
+        col_regime1.metric("Equity regime",  spy_regime)
+        col_regime2.metric("USD trend",      usd_regime)
+        col_regime3.metric("Gold signal",    gold_signal)
+        if tnx_d.get("price"):
+            col_regime4.metric("10yr yield",  f"{tnx_d['price']:.2f}%",
+                               delta=f"{tnx_d.get('chg', 0):+.2f}%" if tnx_d.get("chg") is not None else None,
+                               delta_color="inverse")
+
+    st.divider()
+
+    # -----------------------------------------------------------------------
+    # Spot price cards
+    # -----------------------------------------------------------------------
+
+    st.subheader("Spot prices (USD/oz)")
+
+    mc1, mc2, mc3, mc4 = st.columns(4)
+    for col, (name, ticker) in zip([mc1, mc2, mc3, mc4], _METAL_FUTURES.items()):
+        px   = metal_px.get(ticker, {})
+        p    = px.get("price", 0.0)
+        prev = px.get("prev_close", 0.0)
+        chg  = ((p - prev) / prev * 100) if prev else 0.0
+        p_nzd = p / nzdusd_m if nzdusd_m else p
+        col.metric(
+            f"{name}",
+            f"${p:,.2f}" if p else "—",
+            delta=f"{chg:+.2f}%  (NZD {p_nzd:,.0f}/oz)" if p else None,
+            delta_color="normal",
+        )
+
+    # -----------------------------------------------------------------------
+    # Gold/Silver ratio
+    # -----------------------------------------------------------------------
+
+    st.divider()
+    gs_col, etf_col = st.columns([1, 3])
+
+    with gs_col:
+        if gs_ratio:
+            st.metric(
+                "Gold/Silver ratio",
+                f"{gs_ratio:.1f}",
+                help="oz of silver to buy 1 oz gold. Historical avg ~60. >80 = silver cheap vs gold.",
+            )
+            if gs_ratio > 80:
+                st.caption("Silver historically undervalued vs gold at this ratio.")
+            elif gs_ratio < 60:
+                st.caption("Silver historically expensive vs gold at this ratio.")
+            else:
+                st.caption("Ratio within normal historical range.")
+
+    with etf_col:
+        ec1, ec2, ec3, ec4 = st.columns(4)
+        for col, (etf, label) in zip([ec1, ec2, ec3, ec4], _METAL_ETFS.items()):
+            px   = metal_px.get(etf, {})
+            p    = px.get("price", 0.0)
+            prev = px.get("prev_close", 0.0)
+            chg  = ((p - prev) / prev * 100) if prev else 0.0
+            col.metric(etf, f"${p:.2f}" if p else "—",
+                       delta=f"{chg:+.2f}%" if p else None,
+                       delta_color="normal", help=label)
+
+    st.divider()
+
+    # -----------------------------------------------------------------------
+    # Technical signals table
+    # -----------------------------------------------------------------------
+
+    st.subheader("Technical signals")
+
+    sig_rows = []
+    for name, td in metal_tech.items():
+        def _fmt_mom(v):
+            return f"{v:+.1f}%" if v is not None else "—"
+
+        sig_rows.append({
+            "Metal":       name,
+            "Price":       f"${td['price']:,.2f}",
+            "vs EMA20":    f"{((td['price']/td['ema20']-1)*100):+.1f}%" if td.get("ema20") else "—",
+            "vs EMA50":    f"{((td['price']/td['ema50']-1)*100):+.1f}%" if td.get("ema50") else "—",
+            "5d mom":      _fmt_mom(td.get("mom_5d")),
+            "20d mom":     _fmt_mom(td.get("mom_20d")),
+            "% from 52wk high": f"{td['pct_from_hi']:+.1f}%",
+            "Trend":       td["trend"],
+            "Signal":      td["signal"],
+        })
+
+    if sig_rows:
+        sig_df = pd.DataFrame(sig_rows)
+        st.dataframe(sig_df, use_container_width=True, hide_index=True)
+    else:
+        st.info("Technical data unavailable — chart data still loading.")
+
+    st.divider()
+
+    # -----------------------------------------------------------------------
+    # Advice
+    # -----------------------------------------------------------------------
+
+    st.subheader("Advice")
+
+    adv_cols = st.columns(len(metal_tech) or 1)
+    for col, (name, td) in zip(adv_cols, metal_tech.items()):
+        sig = td["signal"]
+        trend = td["trend"]
+        ema20 = td["ema20"]
+        price = td["price"]
+        hi_52 = td["hi_52"]
+        lo_52 = td["lo_52"]
+
+        with col:
+            st.markdown(f"**{name}**")
+            if sig == "Bullish":
+                st.success(f"Uptrend intact. Price above EMA20 (${ema20:,.0f}) and EMA50.")
+                st.markdown(
+                    f"- Support: EMA20 ~${ema20:,.0f}\n"
+                    f"- 52wk high: ${hi_52:,.0f} ({td['pct_from_hi']:+.1f}%)\n"
+                    f"- Pullbacks toward EMA20 are buying opportunities while trend holds."
+                )
+            elif sig == "Recovering":
+                st.warning(f"Recovering — price above EMA20 but below EMA50.")
+                st.markdown(
+                    f"- Watch for EMA50 (${td['ema50']:,.0f}) reclaim as confirmation.\n"
+                    f"- Support: EMA20 ~${ema20:,.0f}\n"
+                    f"- Not yet a clean long — wait for EMA50 cross."
+                )
+            elif sig == "Watch":
+                st.warning(f"Pulling back below EMA20 — trend under pressure.")
+                st.markdown(
+                    f"- Key level: EMA20 ~${ema20:,.0f} (now resistance)\n"
+                    f"- EMA50 at ${td['ema50']:,.0f} is next support\n"
+                    f"- Avoid new longs until EMA20 reclaimed."
+                )
+            else:
+                st.error(f"Downtrend — below both EMA20 and EMA50.")
+                st.markdown(
+                    f"- Avoid long exposure\n"
+                    f"- EMA20 ~${ema20:,.0f} is now resistance\n"
+                    f"- 52wk low: ${lo_52:,.0f} is next support\n"
+                    f"- Wait for trend reversal confirmation."
+                )
+
+    st.divider()
+
+    # -----------------------------------------------------------------------
+    # Price chart
+    # -----------------------------------------------------------------------
+
+    st.subheader("1-year price chart")
+
+    chart_options = {
+        "Gold (GC=F)":           "GC=F",
+        "Silver (SI=F)":         "SI=F",
+        "Platinum (PL=F)":       "PL=F",
+        "Palladium (PA=F)":      "PA=F",
+        "GLD — SPDR Gold":       "GLD",
+        "SLV — iShares Silver":  "SLV",
+        "GDX — Gold Miners":     "GDX",
+        "GDXJ — Jr Gold Miners": "GDXJ",
+    }
+
+    chart_label  = st.selectbox("Select instrument", list(chart_options.keys()), key="metal_chart_sel")
+    chart_ticker = chart_options[chart_label]
+    chart_df     = fetch_metal_chart(chart_ticker)
+
+    if not chart_df.empty and "Close" in chart_df.columns:
+        # Overlay EMA20 and EMA50
+        chart_df = chart_df.copy()
+        chart_df["EMA20"] = chart_df["Close"].ewm(span=20, adjust=False).mean()
+        chart_df["EMA50"] = chart_df["Close"].ewm(span=50, adjust=False).mean()
+        st.line_chart(chart_df[["Close", "EMA20", "EMA50"]], use_container_width=True)
+        latest_close = float(chart_df["Close"].iloc[-1])
+        hi_52 = float(chart_df["High"].max()) if "High" in chart_df.columns else latest_close
+        lo_52 = float(chart_df["Low"].min())  if "Low"  in chart_df.columns else latest_close
+        ci1, ci2, ci3 = st.columns(3)
+        ci1.metric("52wk high", f"${hi_52:,.2f}")
+        ci2.metric("52wk low",  f"${lo_52:,.2f}")
+        ci3.metric("% from high", f"{(latest_close/hi_52-1)*100:+.1f}%")
+    else:
+        st.info(f"No chart data for {chart_ticker}.")
+
+    st.divider()
+
+    # -----------------------------------------------------------------------
+    # Holdings tracker
+    # -----------------------------------------------------------------------
+
+    st.subheader("Holdings")
+
+    conn = get_conn()
+    metal_df = pd.read_sql("SELECT * FROM metal_holdings ORDER BY id", conn)
+    conn.close()
+
+    metal_rows = []
+    for _, h in metal_df.iterrows():
+        if h["holding_type"] == "physical":
+            fut_ticker = _METAL_FUTURES.get(h["metal"])
+            px_usd   = metal_px.get(fut_ticker, {}).get("price", 0.0) if fut_ticker else 0.0
+            prev_usd = metal_px.get(fut_ticker, {}).get("prev_close", 0.0) if fut_ticker else 0.0
+        else:
+            px_usd   = metal_px.get(h["metal"], {}).get("price", 0.0)
+            prev_usd = metal_px.get(h["metal"], {}).get("prev_close", 0.0)
+
+        qty          = h["quantity"]
+        avg_buy_nzd  = h["avg_buy_price_nzd"]
+        cost_nzd     = qty * avg_buy_nzd
+
+        if px_usd and nzdusd_m:
+            current_nzd_per_unit = px_usd / nzdusd_m
+            current_nzd  = qty * current_nzd_per_unit
+            pl_nzd       = current_nzd - cost_nzd
+            pl_pct       = (current_nzd_per_unit - avg_buy_nzd) / avg_buy_nzd * 100 if avg_buy_nzd else 0.0
+            today_pl_nzd = qty * (px_usd - prev_usd) / nzdusd_m if prev_usd else 0.0
+        else:
+            current_nzd = cost_nzd
+            pl_nzd = pl_pct = today_pl_nzd = 0.0
+
+        metal_rows.append({
+            "id":            h["id"],
+            "Metal/ETF":     h["metal"],
+            "Type":          h["holding_type"],
+            "Quantity":      qty,
+            "Avg buy (NZD)": round(avg_buy_nzd, 4),
+            "Cost (NZD)":    round(cost_nzd, 2),
+            "Current (NZD)": round(current_nzd, 2),
+            "P&L (NZD)":     round(pl_nzd, 2),
+            "P&L %":         round(pl_pct, 2),
+            "Today (NZD)":   round(today_pl_nzd, 2),
+            "Notes":         h["notes"],
+        })
+
+    if metal_rows:
+        m_cost  = sum(r["Cost (NZD)"]    for r in metal_rows)
+        m_value = sum(r["Current (NZD)"] for r in metal_rows)
+        m_pl    = sum(r["P&L (NZD)"]     for r in metal_rows)
+        m_today = sum(r["Today (NZD)"]   for r in metal_rows)
+        m_pl_pct = (m_pl / m_cost * 100) if m_cost else 0.0
+        ms1, ms2, ms3, ms4 = st.columns(4)
+        ms1.metric("Value",     f"NZD {m_value:,.2f}")
+        ms2.metric("Today",     f"NZD {m_today:+,.2f}", delta=f"{m_today:+.2f}", delta_color="normal")
+        ms3.metric("Total P&L", f"NZD {m_pl:+,.2f}",   delta=f"{m_pl_pct:+.2f}%", delta_color="normal")
+        ms4.metric("NZD/USD",   f"{nzdusd_m:.4f}")
+        st.divider()
+
+    with st.expander("Add holding", expanded=False):
+        with st.form("add_metal_form", clear_on_submit=True):
+            mf1, mf2, mf3 = st.columns(3)
+            holding_type_in = mf1.selectbox("Type", ["physical", "etf"])
+            if holding_type_in == "physical":
+                metal_in  = mf2.selectbox("Metal", list(_METAL_FUTURES.keys()))
+                qty_label = "Quantity (oz)"
+            else:
+                metal_in  = mf2.selectbox("ETF", list(_METAL_ETFS.keys()))
+                qty_label = "Shares"
+            avg_nzd_in  = mf3.number_input("Avg buy price (NZD)", min_value=0.0, format="%.4f")
+            qty_in      = st.number_input(qty_label, min_value=0.0, format="%.4f")
+            metal_notes = st.text_area("Notes")
+            m_submitted = st.form_submit_button("Add holding")
+            if m_submitted:
+                if qty_in <= 0 or avg_nzd_in <= 0:
+                    st.error("Quantity and avg buy price required.")
+                else:
+                    conn = get_conn()
+                    conn.execute(
+                        "INSERT INTO metal_holdings (metal, holding_type, quantity, avg_buy_price_nzd, notes) VALUES (?,?,?,?,?)",
+                        (metal_in, holding_type_in, qty_in, avg_nzd_in, metal_notes),
+                    )
+                    conn.commit()
+                    sync_if_turso(conn)
+                    conn.close()
+                    qty_unit = "oz" if holding_type_in == "physical" else "shares"
+                    st.success(f"Added {qty_in} {qty_unit} of {metal_in}")
+                    st.cache_data.clear()
+                    st.rerun()
+
+    if metal_rows:
+        display_metals = pd.DataFrame(metal_rows).drop(columns=["id"])
+        st.dataframe(display_metals, use_container_width=True, hide_index=True,
+            column_config={
+                "P&L (NZD)":   st.column_config.NumberColumn("P&L (NZD)",   format="%.2f"),
+                "P&L %":       st.column_config.NumberColumn("P&L %",       format="%.2f%%"),
+                "Today (NZD)": st.column_config.NumberColumn("Today (NZD)", format="%.2f"),
+            })
+
+        with st.expander("Notes", expanded=False):
+            for r in metal_rows:
+                if r["Notes"]:
+                    st.markdown(f"**{r['Metal/ETF']}** ({r['Type']}) — {r['Notes']}")
+
+        with st.expander("Delete a holding", expanded=False):
+            del_options = {f"#{r['id']}  {r['Metal/ETF']}  ({r['Type']}, {r['Quantity']} units)": r["id"] for r in metal_rows}
+            del_label   = st.selectbox("Select holding", list(del_options.keys()), key="metal_del_sel")
+            if st.button("Delete holding", type="secondary", key="metal_del_btn"):
+                conn = get_conn()
+                conn.execute("DELETE FROM metal_holdings WHERE id = ?", (del_options[del_label],))
+                conn.commit()
+                sync_if_turso(conn)
+                conn.close()
+                st.cache_data.clear()
+                st.rerun()
+    else:
+        st.info("No holdings recorded. Add one above.")
+
+    st.caption(f"Spot prices: 5min  •  Charts: 1hr  •  NZD/USD {nzdusd_m:.4f}")
+
+
+
+# ===========================================================================
+# TAB 9 — Portfolio Builder
+# ===========================================================================
+
+# ---------------------------------------------------------------------------
+# Portfolio construction engine
+# ---------------------------------------------------------------------------
+
+_INVESTMENT_GRADE_NAMES = {
+    "NVDA","ASML","TSM","AAPL","MSFT","GOOGL","AMZN","META",
+    "TSLA","ARM","AVGO","ORCL","CRM","ADBE","SHOP","NFLX",
+    "GLD","SLV","GDX","SPY","QQQ",
+}
+
+_SPEC_EXCLUDE = {"SPY","QQQ"}   # index ETFs not speculative picks
+
+
+def _build_speculative(screener_df: pd.DataFrame, metal_tech: dict, mctx: dict) -> list[dict]:
+    """
+    Select 4-6 speculative picks: high-RVOL momentum longs + best crypto.
+    If gold is bullish, add GDXJ as a levered play.
+    """
+    picks = []
+
+    if screener_df.empty:
+        return picks
+
+    # Long momentum equities — sort by RVOL, filter for quality
+    eq = screener_df[
+        (screener_df["direction"] == "long")
+        & screener_df["setup_type"].str.contains("momentum", case=False, na=False)
+        & (screener_df["tradescore"].fillna(0) >= 30)
+        & ~screener_df["ticker"].str.endswith("-USD")
+        & ~screener_df["ticker"].isin(_SPEC_EXCLUDE)
+    ].sort_values(["rvol", "tradescore"], ascending=False)
+
+    for _, row in eq.head(3).iterrows():
+        price = float(row.get("price") or 0)
+        stop  = float(row.get("stop_loss") or 0)
+        risk_pct = ((price - stop) / price * 100) if price and stop and price > stop else None
+        picks.append({
+            "ticker":      row["ticker"],
+            "display":     row["ticker"],
+            "asset_class": "equity",
+            "direction":   "long",
+            "price":       price,
+            "stop":        stop if stop else None,
+            "risk_pct":    risk_pct,
+            "tradescore":  float(row.get("tradescore") or 0),
+            "rvol":        float(row.get("rvol") or 0),
+            "rsi":         float(row.get("rsi") or 0),
+            "setup_type":  row.get("setup_type", ""),
+            "rationale":   (
+                f"High-RVOL momentum breakout ({row.get('rvol', 0):.1f}x volume). "
+                f"TradeScore {row.get('tradescore', 0):.0f}. RSI {row.get('rsi', 0):.0f} — not exhausted. "
+                f"Entry on intraday confirmation above ${price:.2f}."
+            ),
+            "weight":      0.10,
+            "hold":        "3–10 trading days",
+            "exit":        f"Stop ${stop:.2f}" if stop else "EMA20 as trailing stop",
+        })
+
+    # Best crypto long
+    crypto = screener_df[
+        screener_df["ticker"].str.endswith("-USD")
+        & (screener_df["direction"] == "long")
+        & (screener_df["tradescore"].fillna(0) >= 30)
+    ].sort_values("tradescore", ascending=False)
+
+    btc_d = mctx.get("btc", {})
+    crypto_ok = btc_d.get("above_ema20", False)
+
+    for _, row in crypto.head(2 if crypto_ok else 1).iterrows():
+        coin = row["ticker"].replace("-USD", "")
+        price = float(row.get("price") or 0)
+        picks.append({
+            "ticker":      row["ticker"],
+            "display":     coin,
+            "asset_class": "crypto",
+            "direction":   "long",
+            "price":       price,
+            "stop":        float(row.get("stop_loss") or 0) or None,
+            "risk_pct":    None,
+            "tradescore":  float(row.get("tradescore") or 0),
+            "rvol":        float(row.get("rvol") or 0),
+            "rsi":         float(row.get("rsi") or 0),
+            "setup_type":  row.get("setup_type", ""),
+            "rationale":   (
+                f"{'BTC in uptrend — crypto risk-on environment. ' if crypto_ok else ''}"
+                f"TradeScore {row.get('tradescore', 0):.0f}. "
+                f"Digital asset with high beta to risk-on moves. Size small — volatility is 3–5x equities."
+            ),
+            "weight":      0.08,
+            "hold":        "1–4 weeks",
+            "exit":        "EMA20 break on daily chart",
+        })
+
+    # Junior miners if gold is bullish
+    gold_signal = metal_tech.get("Gold", {}).get("signal", "")
+    if gold_signal == "Bullish" and len(picks) < 6:
+        gdxj_p = fetch_metal_prices().get("GDXJ", {}).get("price", 0)
+        picks.append({
+            "ticker":      "GDXJ",
+            "display":     "GDXJ",
+            "asset_class": "etf",
+            "direction":   "long",
+            "price":       gdxj_p,
+            "stop":        None,
+            "risk_pct":    None,
+            "tradescore":  None,
+            "rvol":        None,
+            "rsi":         None,
+            "setup_type":  "ETF",
+            "rationale":   (
+                "Gold in confirmed uptrend. Junior miners amplify gold moves 2–3x. "
+                "GDXJ provides levered exposure without single-stock risk. "
+                "Hold as long as gold stays above EMA20."
+            ),
+            "weight":      0.07,
+            "hold":        "Weeks to months (follow gold trend)",
+            "exit":        "Gold breaks EMA20",
+        })
+
+    return picks
+
+
+def _build_investment(screener_df: pd.DataFrame, metal_tech: dict, mctx: dict) -> list[dict]:
+    """
+    Select 4–6 investment-grade picks: high-TradeScore quality names + gold allocation.
+    """
+    picks = []
+
+    if not screener_df.empty:
+        # Quality long setups — high TradeScore, established names
+        quality = screener_df[
+            (screener_df["direction"] == "long")
+            & (screener_df["tradescore"].fillna(0) >= 40)
+            & ~screener_df["ticker"].str.endswith("-USD")
+            & screener_df["ticker"].isin(_INVESTMENT_GRADE_NAMES)
+        ].sort_values("tradescore", ascending=False)
+
+        for _, row in quality.head(4).iterrows():
+            price = float(row.get("price") or 0)
+            stop  = float(row.get("stop_loss") or 0)
+            ts    = float(row.get("tradescore") or 0)
+            picks.append({
+                "ticker":      row["ticker"],
+                "display":     row["ticker"],
+                "asset_class": "equity",
+                "direction":   "long",
+                "price":       price,
+                "stop":        stop if stop else None,
+                "risk_pct":    ((price - stop) / price * 100) if price and stop and price > stop else None,
+                "tradescore":  ts,
+                "rvol":        float(row.get("rvol") or 0),
+                "rsi":         float(row.get("rsi") or 0),
+                "setup_type":  row.get("setup_type", ""),
+                "rationale":   (
+                    f"High-conviction setup. TradeScore {ts:.0f} — above the 45-point threshold for quality. "
+                    f"Established name with institutional following. "
+                    f"RSI {row.get('rsi', 0):.0f} — momentum without being extended. "
+                    f"Size larger than speculative — stop is defined, thesis is durable."
+                ),
+                "weight":      0.20,
+                "hold":        "2–8 weeks",
+                "exit":        f"Close below EMA20 (stop ~${stop:.2f})" if stop else "EMA20 as trailing stop",
+            })
+
+    # Gold — always include if signal is bullish or neutral
+    gold_td = metal_tech.get("Gold", {})
+    gold_sig = gold_td.get("signal", "")
+    if gold_sig in ("Bullish", "Recovering", "Watch") or not screener_df.empty:
+        gold_p = fetch_metal_prices().get("GC=F", {}).get("price", 0)
+        gld_p  = fetch_metal_prices().get("GLD",  {}).get("price", 0)
+        ema20  = gold_td.get("ema20", 0)
+        picks.append({
+            "ticker":      "GC=F",
+            "display":     "Gold (via GLD ETF)",
+            "asset_class": "metal",
+            "direction":   "long",
+            "price":       gld_p or gold_p,
+            "stop":        round(ema20 / (fetch_metal_prices().get("GC=F", {}).get("price", 1) or 1) * (gld_p or gold_p) * 0.98, 2) if ema20 and gld_p else None,
+            "risk_pct":    None,
+            "tradescore":  None,
+            "rvol":        None,
+            "rsi":         None,
+            "setup_type":  "Store of value",
+            "rationale":   (
+                f"Gold signal: {gold_sig}. Core defensive allocation — not a trade, a position. "
+                "Negative correlation to USD and equities in risk-off environments. "
+                "Inflation hedge with no counterparty risk. "
+                "Use GLD ETF for liquidity; hold as long as macro drivers support (USD weakness, rate uncertainty)."
+            ),
+            "weight":      0.20,
+            "hold":        "Months — macro driven",
+            "exit":        f"Gold breaks below EMA20 (~${ema20:,.0f})" if ema20 else "EMA20 break",
+        })
+
+    return picks
+
+
+with tab_portfolio:
+
+    nzdusd_port  = fetch_nzdusd()
+    metal_px_port = fetch_metal_prices()
+    metal_tech_port = fetch_metal_technicals()
+    mctx_port    = fetch_market_context()
+
+    # -----------------------------------------------------------------------
+    # Macro regime
+    # -----------------------------------------------------------------------
+
+    spy_port = mctx_port.get("spy", {})
+    btc_port = mctx_port.get("btc", {})
+    usd_port = mctx_port.get("usd", {})
+    tnx_port = mctx_port.get("tnx", {})
+
+    rg1, rg2, rg3, rg4 = st.columns(4)
+    rg1.metric("Equity regime",  _regime_label(mctx_port, "spy"),
+               delta=f"{spy_port.get('chg', 0):+.2f}%" if spy_port.get("chg") is not None else None,
+               delta_color="normal")
+    rg2.metric("Crypto (BTC)",   _regime_label(mctx_port, "btc"),
+               delta=f"{btc_port.get('chg', 0):+.2f}%" if btc_port.get("chg") is not None else None,
+               delta_color="normal")
+    rg3.metric("USD trend",      _regime_label(mctx_port, "usd"),
+               delta=f"{usd_port.get('chg', 0):+.2f}%" if usd_port.get("chg") is not None else None,
+               delta_color="inverse")
+    rg4.metric("10yr yield",
+               f"{tnx_port.get('price', 0):.2f}%" if tnx_port.get("price") else "—",
+               delta=f"{tnx_port.get('chg', 0):+.2f}%" if tnx_port.get("chg") is not None else None,
+               delta_color="inverse")
+
+    st.divider()
+
+    # -----------------------------------------------------------------------
+    # Load today's screener
+    # -----------------------------------------------------------------------
+
+    if dates:
+        conn = get_conn()
+        today_screener = pd.read_sql(
+            "SELECT * FROM results WHERE run_date = ? ORDER BY tradescore DESC",
+            conn, params=(dates[0],),
+        )
+        conn.close()
+        run_date_label = dates[0]
+    else:
+        today_screener = pd.DataFrame()
+        run_date_label = "—"
+
+    # Portfolio size input
+    port_size_nzd = st.number_input(
+        "Portfolio size (NZD)",
+        min_value=1000.0, max_value=500000.0, value=10000.0, step=1000.0,
+        help="Set this to your actual or hypothetical portfolio size. "
+             "All position sizes and dollar amounts will scale to this."
+    )
+
+    st.divider()
+
+    # -----------------------------------------------------------------------
+    # Build portfolios
+    # -----------------------------------------------------------------------
+
+    spec_picks = _build_speculative(today_screener, metal_tech_port, mctx_port)
+    inv_picks  = _build_investment(today_screener,  metal_tech_port, mctx_port)
+
+    def _render_pick_card(pick: dict, allocation_nzd: float, idx: int):
+        ticker   = pick["display"]
+        ac       = pick["asset_class"]
+        price    = pick.get("price", 0)
+        stop     = pick.get("stop")
+        rationale = pick.get("rationale", "")
+        hold     = pick.get("hold", "—")
+        exit_rule = pick.get("exit", "—")
+        ts       = pick.get("tradescore")
+        rvol     = pick.get("rvol")
+        rsi_v    = pick.get("rsi")
+        risk_pct = pick.get("risk_pct")
+        drivers  = _driver_tags(pick["ticker"])
+
+        with st.container(border=True):
+            h1, h2, h3, h4 = st.columns([2, 1, 1, 1])
+            h1.markdown(f"**{ticker}**  `{ac}`")
+            h2.metric("Allocation", f"NZD {allocation_nzd:,.0f}")
+            h3.metric("Price", f"${price:,.2f}" if price else "—")
+            if stop and price:
+                h4.metric("Stop", f"${stop:,.2f}", delta=f"{((stop/price-1)*100):+.1f}%", delta_color="inverse")
+            elif stop:
+                h4.metric("Stop", f"${stop:,.2f}")
+
+            if ts is not None or rvol is not None:
+                m1, m2, m3 = st.columns(3)
+                if ts is not None:
+                    m1.metric("TradeScore", f"{ts:.0f}")
+                if rvol is not None:
+                    m2.metric("RVOL", f"{rvol:.1f}x")
+                if rsi_v is not None:
+                    m3.metric("RSI", f"{rsi_v:.0f}")
+
+            st.markdown(f"**Why this pick:**  {rationale}")
+
+            tags_str = "  ".join(f"`{t}`" for t in drivers)
+            st.caption(f"Drivers: {tags_str}")
+
+            c1, c2 = st.columns(2)
+            c1.caption(f"Hold period: {hold}")
+            c2.caption(f"Exit: {exit_rule}")
+
+            if risk_pct and stop and price:
+                risk_nzd = allocation_nzd * risk_pct / 100
+                st.caption(f"Risk at stop: {risk_pct:.1f}% of position = NZD {risk_nzd:,.0f}")
+
+    def _render_portfolio_section(title: str, caption: str, picks: list[dict], colour_hint: str, total_nzd: float):
+        st.markdown(f"### {title}")
+        st.caption(caption)
+
+        if not picks:
+            st.info("No qualifying picks today. Check back after the next screener run.")
+            return
+
+        total_weight = sum(p["weight"] for p in picks)
+        # Normalise weights so they sum to 1
+        for p in picks:
+            p["_norm_weight"] = p["weight"] / total_weight if total_weight else 1 / len(picks)
+
+        for i, pick in enumerate(picks):
+            alloc = total_nzd * pick["_norm_weight"]
+            _render_pick_card(pick, alloc, i)
+
+        # Allocation summary
+        st.markdown("**Allocation breakdown**")
+        alloc_data = {p["display"]: round(total_nzd * p["_norm_weight"], 0) for p in picks}
+        alloc_df = pd.DataFrame(list(alloc_data.items()), columns=["Position", "NZD"]).set_index("Position")
+        st.bar_chart(alloc_df, use_container_width=True)
+
+        # Asset class mix
+        class_mix: dict[str, float] = {}
+        for p in picks:
+            ac = p["asset_class"]
+            class_mix[ac] = class_mix.get(ac, 0) + p["_norm_weight"] * 100
+        mix_str = "  |  ".join(f"{k.title()} {v:.0f}%" for k, v in class_mix.items())
+        st.caption(f"Mix: {mix_str}")
+
+    # -----------------------------------------------------------------------
+    # Two-column layout
+    # -----------------------------------------------------------------------
+
+    spec_budget = port_size_nzd * 0.40   # 40% of portfolio to speculative
+    inv_budget  = port_size_nzd * 0.60   # 60% to investment grade
+
+    col_s, col_i = st.columns(2)
+
+    with col_s:
+        _render_portfolio_section(
+            title="Speculative  (40%)",
+            caption=(
+                "Short-term, high-momentum positions. Higher risk, higher potential reward. "
+                "Each position is sized so a stop-out costs 1–2% of total portfolio. "
+                "These require active management — check daily."
+            ),
+            picks=spec_picks,
+            colour_hint="orange",
+            total_nzd=spec_budget,
+        )
+
+    with col_i:
+        _render_portfolio_section(
+            title="Investment Grade  (60%)",
+            caption=(
+                "Quality assets with a durable thesis. Hold weeks to months. "
+                "Position sizes are larger because conviction is higher and stops are wider. "
+                "Review weekly, not daily."
+            ),
+            picks=inv_picks,
+            colour_hint="blue",
+            total_nzd=inv_budget,
+        )
+
+    st.divider()
+
+    # -----------------------------------------------------------------------
+    # Combined portfolio view
+    # -----------------------------------------------------------------------
+
+    all_picks = spec_picks + inv_picks
+    if all_picks:
+        st.subheader("Combined portfolio")
+
+        # Normalise within each portfolio
+        spec_norm = sum(p.get("_norm_weight", 0) for p in spec_picks)
+        inv_norm  = sum(p.get("_norm_weight", 0) for p in inv_picks)
+
+        combined_rows = []
+        for p in spec_picks:
+            w = p.get("_norm_weight", 0)
+            port_pct = (w / spec_norm * 0.40 * 100) if spec_norm else 0
+            combined_rows.append({
+                "Portfolio":    "Speculative",
+                "Ticker":       p["display"],
+                "Asset class":  p["asset_class"],
+                "Hold period":  p.get("hold", "—"),
+                "Port % ":      round(port_pct, 1),
+                "NZD":          round(spec_budget * w, 0),
+                "Exit rule":    p.get("exit", "—"),
+            })
+        for p in inv_picks:
+            w = p.get("_norm_weight", 0)
+            port_pct = (w / inv_norm * 0.60 * 100) if inv_norm else 0
+            combined_rows.append({
+                "Portfolio":    "Investment",
+                "Ticker":       p["display"],
+                "Asset class":  p["asset_class"],
+                "Hold period":  p.get("hold", "—"),
+                "Port % ":      round(port_pct, 1),
+                "NZD":          round(inv_budget * w, 0),
+                "Exit rule":    p.get("exit", "—"),
+            })
+
+        st.dataframe(
+            pd.DataFrame(combined_rows),
+            use_container_width=True, hide_index=True,
+            column_config={
+                "Port % ": st.column_config.NumberColumn("Port %", format="%.1f%%"),
+                "NZD":     st.column_config.NumberColumn("NZD", format="NZD %.0f"),
+            },
+        )
+
+        # Theme concentration
+        st.divider()
+        st.subheader("Theme concentration")
+        st.caption("Identifies where your portfolio is thematically concentrated — useful for spotting correlation risk.")
+
+        theme_counts: dict[str, list[str]] = {}
+        for p in all_picks:
+            for tag in _driver_tags(p["ticker"]):
+                theme_counts.setdefault(tag, []).append(p["display"])
+
+        multi = {t: tickers for t, tickers in theme_counts.items() if len(tickers) >= 2}
+        single = {t: tickers for t, tickers in theme_counts.items() if len(tickers) == 1}
+
+        if multi:
+            st.markdown("**Concentrated themes (2+ positions):**")
+            for theme, tickers in sorted(multi.items(), key=lambda x: -len(x[1])):
+                st.markdown(f"- **{theme}**: {', '.join(tickers)}")
+        if single:
+            with st.expander("Single-position themes"):
+                for theme, tickers in single.items():
+                    st.markdown(f"- {theme}: {tickers[0]}")
+
+    st.divider()
+
+    # -----------------------------------------------------------------------
+    # Key risks
+    # -----------------------------------------------------------------------
+
+    st.subheader("Key risks to watch")
+
+    risks = []
+    spy_d = mctx_port.get("spy", {})
+    if not spy_d.get("above_ema50"):
+        risks.append("Equities below EMA50 — momentum picks are swimming against the tide. Reduce speculative allocation.")
+    if not btc_port.get("above_ema20"):
+        risks.append("BTC below EMA20 — crypto risk-off. Halve crypto exposure or avoid.")
+    if usd_port.get("above_ema50"):
+        risks.append("USD strengthening — headwind for gold and commodities. Watch metal positions.")
+    if tnx_port.get("price", 0) > 4.5:
+        risks.append(f"10yr yield {tnx_port['price']:.2f}% — elevated rates compress growth multiples. Favour value over momentum.")
+    if not risks:
+        risks.append("No major red flags in the current macro data. Continue following position-level stops.")
+
+    for r in risks:
+        st.warning(r)
+
+    st.caption(
+        f"Built from screener run {run_date_label}  •  "
+        f"Regime data refreshes every 5 min  •  "
+        f"NZD/USD {nzdusd_port:.4f}"
+    )

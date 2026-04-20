@@ -6,3 +6,8 @@ screener.db
 logs/
 .DS_Store
 alerts.csv
+
+# SQLite runtime files (libsql embedded replica and WAL mode)
+screener.db-shm
+screener.db-wal
+screener.db-info
