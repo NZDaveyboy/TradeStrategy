@@ -3,7 +3,7 @@ import math
 import os
 from datetime import date, datetime
 
-from core.db import get_connection, sync_if_turso
+from core.db import get_connection
 from core.edgar_rss import poll_early_signals
 from core.recommendations import STRATEGY_DISPLAY, build_recommendation
 from core.sec_edgar import get_recent_filings
@@ -46,16 +46,7 @@ st.title("TradeStrategy")
 # Database helpers
 # ---------------------------------------------------------------------------
 
-@st.cache_resource
-def _sync_db_once():
-    """Pull latest from Turso once per Streamlit worker process. No-op for local SQLite."""
-    conn = get_connection(DB_PATH)
-    sync_if_turso(conn)
-    conn.close()
-
-
 def get_conn():
-    _sync_db_once()
     return get_connection(DB_PATH)
 
 
@@ -122,7 +113,6 @@ def init_tracker_tables():
         )
     """)
     conn.commit()
-    sync_if_turso(conn)
     conn.close()
 
 
@@ -867,7 +857,6 @@ with tab_tracker:
                          entry_price, shares_calc, position_nzd, notes_in),
                     )
                     conn.commit()
-                    sync_if_turso(conn)
                     conn.close()
                     st.success(f"Added {ticker_in} — {shares_calc:.4f} shares @ ${entry_price:.4f}")
                     st.cache_data.clear()
@@ -904,7 +893,6 @@ with tab_tracker:
                 conn = get_conn()
                 conn.execute("UPDATE trades SET is_open = 0 WHERE id = ?", (selected_id,))
                 conn.commit()
-                sync_if_turso(conn)
                 conn.close()
                 st.cache_data.clear()
                 st.rerun()
@@ -913,7 +901,6 @@ with tab_tracker:
                 conn = get_conn()
                 conn.execute("DELETE FROM trades WHERE id = ?", (selected_id,))
                 conn.commit()
-                sync_if_turso(conn)
                 conn.close()
                 st.cache_data.clear()
                 st.rerun()
@@ -949,7 +936,6 @@ with tab_tracker:
                         (coin_in, amount_in, avg_buy_nzd_in, crypto_notes),
                     )
                     conn.commit()
-                    sync_if_turso(conn)
                     conn.close()
                     st.success(f"Added {amount_in} {coin_in}")
                     st.cache_data.clear()
@@ -984,7 +970,6 @@ with tab_tracker:
                 conn = get_conn()
                 conn.execute("DELETE FROM crypto_holdings WHERE id = ?", (selected_id_c,))
                 conn.commit()
-                sync_if_turso(conn)
                 conn.close()
                 st.cache_data.clear()
                 st.rerun()
@@ -3500,7 +3485,6 @@ with tab_metals:
                         (metal_in, holding_type_in, qty_in, avg_nzd_in, metal_notes),
                     )
                     conn.commit()
-                    sync_if_turso(conn)
                     conn.close()
                     qty_unit = "oz" if holding_type_in == "physical" else "shares"
                     st.success(f"Added {qty_in} {qty_unit} of {metal_in}")
@@ -3528,7 +3512,6 @@ with tab_metals:
                 conn = get_conn()
                 conn.execute("DELETE FROM metal_holdings WHERE id = ?", (del_options[del_label],))
                 conn.commit()
-                sync_if_turso(conn)
                 conn.close()
                 st.cache_data.clear()
                 st.rerun()

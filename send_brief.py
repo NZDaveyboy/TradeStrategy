@@ -17,7 +17,7 @@ import json
 import os
 from datetime import datetime, timezone
 
-from core.db import get_connection, sync_if_turso
+from core.db import get_connection
 
 # ---------------------------------------------------------------------------
 # Load .env (same pattern as scan_premarket.py)
@@ -115,7 +115,6 @@ def _load_today(run_date: str) -> list[dict]:
             except Exception:
                 pass
         conn.commit()
-        sync_if_turso(conn)
         cursor = conn.execute(
             """
             SELECT ticker, price, change_pct, rvol, rsi, atr, vwap,

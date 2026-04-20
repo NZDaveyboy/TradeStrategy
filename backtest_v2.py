@@ -25,7 +25,7 @@ import math
 import os
 import time
 
-from core.db import get_connection, sync_if_turso
+from core.db import get_connection
 from datetime import datetime, timezone
 
 import pandas as pd
@@ -58,7 +58,6 @@ def init_table():
         )
     """)
     conn.commit()
-    sync_if_turso(conn)
     conn.close()
 
 
@@ -86,7 +85,6 @@ def save_result(r: dict, commission: float, max_hold_days: int):
         ),
     )
     conn.commit()
-    sync_if_turso(conn)
     conn.close()
 
 

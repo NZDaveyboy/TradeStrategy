@@ -25,7 +25,7 @@ import math
 import os
 import time
 
-from core.db import get_connection, sync_if_turso
+from core.db import get_connection
 
 import numpy as np
 import pandas as pd
@@ -146,7 +146,6 @@ def init_table():
         )
     """)
     conn.commit()
-    sync_if_turso(conn)
     conn.close()
 
 
@@ -178,7 +177,6 @@ def save_row(r: dict):
         r.get("return_5d"),     r.get("return_10d"),
     ))
     conn.commit()
-    sync_if_turso(conn)
     conn.close()
 
 

@@ -5,13 +5,12 @@ on:
     - cron: '0 13 * * 1-5'   # 9:00am ET (13:00 UTC) Mon–Fri
   workflow_dispatch:           # keep manual trigger for testing
 
+permissions:
+  contents: write              # required to push screener.db back to the repo
+
 jobs:
   screen:
     runs-on: ubuntu-22.04
-
-    env:
-      TURSO_URL:        ${{ secrets.TURSO_URL }}
-      TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
 
     steps:
       - uses: actions/checkout@v5
@@ -27,41 +26,10 @@ jobs:
       - name: Run screener
         run: python run.py
 
-      - name: Verify rows written to Turso
-        if: always()
+      - name: Commit screener.db to repo
         run: |
-          python - <<'EOF'
-          import os, sys
-          import libsql_experimental as libsql
-
-          url   = os.environ.get("TURSO_URL", "")
-          token = os.environ.get("TURSO_AUTH_TOKEN", "")
-
-          if not (url and token):
-              print("SKIP: TURSO_URL / TURSO_AUTH_TOKEN not set — cannot verify row count.")
-              sys.exit(0)
-
-          from datetime import date
-          today = date.today().isoformat()
-
-          conn = libsql.connect("verify.db", sync_url=url, auth_token=token)
-          conn.sync()
-
-          row_count = conn.execute(
-              "SELECT COUNT(*) FROM results WHERE run_date = ?", (today,)
-          ).fetchone()[0]
-          conn.close()
-
-          print(f"run_date : {today}")
-          print(f"rows     : {row_count}")
-
-          if row_count == 0:
-              print(
-                  f"ERROR: 0 rows written for {today}. "
-                  "Screener produced no candidates, or the DB write failed. "
-                  "Check the 'Run screener' step output above for ERR lines or yfinance blocks."
-              )
-              sys.exit(1)
-
-          print(f"OK: {row_count} row(s) confirmed in Turso for {today}.")
-          EOF
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add screener.db
+          git diff --cached --quiet || git commit -m "Daily scan $(date -u +%Y-%m-%d)"
+          git push origin main

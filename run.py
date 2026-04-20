@@ -17,7 +17,7 @@ import math
 import os
 from datetime import datetime, timezone
 
-from core.db import get_connection, sync_if_turso
+from core.db import get_connection
 
 import pandas as pd
 
@@ -120,7 +120,6 @@ def init_db():
         except Exception:
             pass  # column already exists
     conn.commit()
-    sync_if_turso(conn)
     conn.close()
 
 
@@ -160,7 +159,6 @@ def save_results(run_date: str, rows: list[dict]):
             ),
         )
     conn.commit()
-    sync_if_turso(conn)
     conn.close()
 
 

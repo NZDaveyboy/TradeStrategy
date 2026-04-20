@@ -16,7 +16,7 @@ import sqlite3
 from contextlib import contextmanager
 from typing import Generator
 
-from core.db import get_connection, sync_if_turso
+from core.db import get_connection
 
 import pandas as pd
 
@@ -63,12 +63,10 @@ CREATE TABLE IF NOT EXISTS research_results (
 @contextmanager
 def _connect(db_path: str = DB_PATH) -> Generator[sqlite3.Connection, None, None]:
     conn = get_connection(db_path)
-    if not getattr(conn, "sync", None):  # WAL only for local SQLite; Turso manages its own
-        conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA journal_mode=WAL")
     try:
         yield conn
         conn.commit()
-        sync_if_turso(conn)
     finally:
         conn.close()
 

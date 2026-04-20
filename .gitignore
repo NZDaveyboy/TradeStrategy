@@ -2,12 +2,11 @@ __pycache__/
 *.pyc
 .env
 
-screener.db
 logs/
 .DS_Store
 alerts.csv
 
-# SQLite runtime files (libsql embedded replica and WAL mode)
+# SQLite WAL runtime files
 screener.db-shm
 screener.db-wal
 screener.db-info

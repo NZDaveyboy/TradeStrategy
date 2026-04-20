@@ -19,7 +19,7 @@ in the Backtest tab of the Streamlit app.
 import os
 import time
 
-from core.db import get_connection, sync_if_turso
+from core.db import get_connection
 from datetime import datetime, timedelta
 
 import pandas as pd
@@ -61,7 +61,6 @@ def init_backtest_table():
         )
     """)
     conn.commit()
-    sync_if_turso(conn)
     conn.close()
 
 
@@ -103,7 +102,6 @@ def save_backtest_row(row: dict):
         ),
     )
     conn.commit()
-    sync_if_turso(conn)
     conn.close()
 
 
