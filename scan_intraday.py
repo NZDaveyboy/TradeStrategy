@@ -71,7 +71,7 @@ GAP_THRESHOLD           = 2.0   # % gap: today's open vs previous close
 MIN_SLOT_SESSIONS       = 5     # minimum historical sessions needed to score a slot
 
 WATCHLISTS = {
-    "equity": ["tickers_tech.txt", "tickers_ai.txt", "tickers_momentum.txt"],
+    "equity": ["tickers_tech.txt", "tickers_ai.txt", "tickers_momentum.txt", "tickers_storage_semis.txt"],
     "crypto": ["tickers_crypto.txt"],
 }
 

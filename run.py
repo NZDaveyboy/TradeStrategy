@@ -48,10 +48,11 @@ _discovery = FinvizDiscoveryProvider()
 DB_PATH = os.path.join(os.path.dirname(__file__), "screener.db")
 
 STRATEGY_FILES = {
-    "ai":       "tickers_ai.txt",
-    "tech":     "tickers_tech.txt",
-    "crypto":   "tickers_crypto.txt",
-    "momentum": "tickers_momentum.txt",
+    "ai":              "tickers_ai.txt",
+    "tech":            "tickers_tech.txt",
+    "crypto":          "tickers_crypto.txt",
+    "momentum":        "tickers_momentum.txt",
+    "storage_semis":   "tickers_storage_semis.txt",
 }
 
 # Momentum filters applied to Finviz top gainers only.

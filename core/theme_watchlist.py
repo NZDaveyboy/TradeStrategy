@@ -29,8 +29,24 @@ AI_INFRASTRUCTURE: list[str] = [
     "SNOW", "MDB", "NET",
 ]
 
+STORAGE_SEMICONDUCTORS: list[str] = [
+    # Broad semiconductors — design / GPU / CPU
+    "NVDA", "AMD", "INTC", "TSM", "ASML", "AVGO", "QCOM", "MRVL",
+    # Semi cap equipment
+    "AMAT", "LRCX", "KLAC",
+    # Analog / mixed-signal / specialty
+    "ADI", "MCHP", "TXN", "NXPI", "ON", "MPWR",
+    # Compute / accelerators / server hardware
+    "ARM", "SMCI", "ALAB",
+    # Memory & storage chips
+    "MU", "SNDK",
+    # Storage hardware (drives, enterprise arrays)
+    "WDC", "STX", "NTAP", "PSTG",
+]
+
 THEME_WATCHLISTS: dict[str, list[str]] = {
-    "AI Infrastructure": AI_INFRASTRUCTURE,
+    "AI Infrastructure":       AI_INFRASTRUCTURE,
+    "Storage & Semiconductors": STORAGE_SEMICONDUCTORS,
 }
 
 # ---------------------------------------------------------------------------

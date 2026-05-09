@@ -3,7 +3,7 @@
 Pre-market / early-session scanner for TradeStrategy.
 
 Scheduled via GitHub Actions at 9:00am and 9:45am EST Mon-Fri.
-Loads tickers from tickers_tech.txt and tickers_ai.txt.
+Loads tickers from tickers_tech.txt, tickers_ai.txt, and tickers_storage_semis.txt.
 
 Alert triggers (any one is sufficient):
   - RVOL >= 3x  (today's volume vs 20-day avg)
@@ -61,7 +61,7 @@ RVOL_THRESHOLD   = 3.0
 CHANGE_THRESHOLD = 5.0
 GAP_THRESHOLD    = 3.0
 
-WATCHLISTS = ["tickers_tech.txt", "tickers_ai.txt"]
+WATCHLISTS = ["tickers_tech.txt", "tickers_ai.txt", "tickers_storage_semis.txt"]
 
 
 # ---------------------------------------------------------------------------
