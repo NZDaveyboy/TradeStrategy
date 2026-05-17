@@ -201,9 +201,10 @@ _IV_FALLBACK_WARNING = (
 def build_recommendation(
     row: dict,
     *,
-    atm_iv:  float | None = None,
-    rv30:    float | None = None,
-    iv_mode: str = "live",
+    atm_iv:   float | None = None,
+    rv30:     float | None = None,
+    iv_mode:  str = "live",
+    catalyst: dict | None = None,
 ) -> Recommendation:
     """
     Build a Recommendation from a screener results row dict.
@@ -220,12 +221,24 @@ def build_recommendation(
                      to spread (conservative — defined risk regardless of IV).
                      A warning is added so the UI can surface the limitation.
 
-    Same ticker + same iv_mode + same inputs → identical strategy_name.
+    catalyst — optional output from `core.catalysts.compute_catalyst_score`.
+    When provided, the function:
+      • appends a one-line catalyst summary to `rationale`
+      • promotes any warning-flagged catalyst tag (containing "⚠") to
+        the `warnings` list
+      • leaves strategy choice and stop/target untouched (catalyst is
+        context, not a strategy override). Same ticker + same iv_mode +
+        same inputs → identical strategy_name.
+
     Advice tab always uses "fallback". Options tab always uses "live".
+    Catalyst integration is opt-in for callers; backward-compatible (None
+    keeps prior behaviour).
     """
     ticker     = str(row.get("ticker") or "")
     price      = float(row.get("price")   or 0)
     ema20      = float(row.get("ema20")   or price)
+    ema200_raw = row.get("ema200")
+    ema200     = float(ema200_raw) if ema200_raw not in (None, 0, 0.0) else None
     atr        = float(row.get("atr")     or price * 0.02)
     direction  = str(row.get("direction") or "").lower().strip()
     tradescore = float(row.get("tradescore") or 0)
@@ -362,6 +375,28 @@ def build_recommendation(
         invalidation  = None
         target_price  = None
 
+    # ── EMA200 regime check (soft warning, not a filter) ────────────────────
+    # For actionable directional trades, flag when price is on the opposite
+    # side of the 200 EMA — i.e. the trade fights the long-term trend.
+    # Does not change the category; just surfaces the risk so the user can
+    # adjust size or skip. Skip for already-flagged setups to avoid double-warning.
+    counter_trend = False
+    if ema200 is not None and is_actionable:
+        if direction == "long" and price < ema200:
+            counter_trend = True
+            pct_below_200 = (ema200 - price) / ema200 * 100
+            warnings.append(
+                f"Counter-trend long — price ${price:.2f} is {pct_below_200:.1f}% "
+                f"below EMA200 (${ema200:.2f}). Consider reduced size."
+            )
+        elif direction == "short" and price > ema200:
+            counter_trend = True
+            pct_above_200 = (price - ema200) / ema200 * 100
+            warnings.append(
+                f"Counter-trend short — price ${price:.2f} is {pct_above_200:.1f}% "
+                f"above EMA200 (${ema200:.2f}). Consider reduced size."
+            )
+
     # ── Risk/reward ──────────────────────────────────────────────────────────
     if invalidation is not None and target_price is not None and price > 0:
         if direction == "long":
@@ -392,6 +427,21 @@ def build_recommendation(
         warnings=warnings,
     )
 
+    # EMA200 regime line — appended for actionable directional trades only
+    if ema200 is not None and is_actionable and direction in ("long", "short"):
+        if counter_trend:
+            rationale += (
+                f" Note: counter-trend setup — price is on the wrong side of EMA200 "
+                f"(${ema200:.2f}). Bias toward smaller size or wait for trend confirmation."
+            )
+        else:
+            side = "above" if direction == "long" else "below"
+            rationale += f" Trend-aligned — price {side} EMA200 (${ema200:.2f})."
+
+    # ── Catalyst overlay (Phase 10 — plain-English in cards) ────────────────
+    if catalyst:
+        rationale, warnings = _apply_catalyst_overlay(rationale, warnings, catalyst)
+
     return Recommendation(
         ticker=ticker,
         direction=direction,
@@ -407,3 +457,62 @@ def build_recommendation(
         warnings=warnings,
         is_actionable=is_actionable,
     )
+
+
+# ---------------------------------------------------------------------------
+# Catalyst overlay helper
+# ---------------------------------------------------------------------------
+
+def _apply_catalyst_overlay(
+    rationale: str,
+    warnings: list[str],
+    catalyst: dict,
+) -> tuple[str, list[str]]:
+    """Augment rationale + warnings with catalyst data from compute_catalyst_score.
+
+    Pure function — no network. Backward-compatible: returns inputs unchanged
+    if `catalyst` is missing required fields.
+
+    Rules:
+      • Append a one-line CatalystScore summary to rationale.
+      • Promote any tag containing "⚠" to warnings (binary event risk).
+      • Don't mutate strategy / stop / target — catalyst is context, not
+        an override.
+    """
+    if not isinstance(catalyst, dict):
+        return rationale, warnings
+
+    score = catalyst.get("score")
+    tags  = catalyst.get("tags") or []
+
+    if score is None and not tags:
+        return rationale, warnings
+
+    # Promote ⚠ tags to warnings (binary event risk, etc.)
+    for tag in tags:
+        if isinstance(tag, str) and "⚠" in tag:
+            # Avoid duplicating
+            if tag not in warnings:
+                warnings.append(tag)
+
+    # Build a one-line catalyst summary for the rationale.
+    if score is None:
+        return rationale, warnings
+
+    # Lean = bullish-leaning, bearish-leaning, or mixed
+    if score >= 65:
+        lean = "bullish-leaning"
+    elif score <= 35:
+        lean = "bearish-leaning"
+    else:
+        lean = "mixed / neutral"
+
+    # Pick up to 2 most informative non-⚠ tags for the rationale.
+    summary_tags = [t for t in tags if "⚠" not in t][:2]
+    if summary_tags:
+        tag_blob = "; ".join(summary_tags)
+        catalyst_line = f"\n\n**CatalystScore {score:.0f}/100 ({lean}):** {tag_blob}."
+    else:
+        catalyst_line = f"\n\n**CatalystScore {score:.0f}/100 ({lean}).**"
+
+    return rationale + catalyst_line, warnings

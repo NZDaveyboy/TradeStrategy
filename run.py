@@ -40,7 +40,8 @@ from core.tradescore import (
     ER_VWAP_WARN, ER_VWAP_HARD, ER_VWAP_MAX_PTS, ER_5D_WARN, ER_5D_HARD, ER_5D_MAX_PTS,
     LQ_DVOL_MIN, LQ_DVOL_FULL, LQ_DVOL_MAX_PTS, LQ_QUAL_MAX_PTS, LQ_CONS_MAX_PTS,
 )
-from providers.yfinance_provider import FinvizDiscoveryProvider, YFinanceProvider
+from providers.yfinance_provider import YFinanceProvider
+from providers.scraped_provider import FinvizDiscoveryProvider
 
 _provider  = YFinanceProvider()
 _discovery = FinvizDiscoveryProvider()

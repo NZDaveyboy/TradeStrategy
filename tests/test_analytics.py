@@ -18,8 +18,13 @@ import pandas as pd
 import pytest
 
 from core.analytics import (
+    DEFAULT_PERIODS_PER_YEAR,
+    DEFAULT_RISK_FREE_RATE,
+    dated_returns_series,
+    drawdown_series,
     equity_curve,
     load_v2_data,
+    monthly_returns_table,
     performance_by_score_bucket,
     portfolio_stats,
     win_rate_by_setup,
@@ -150,6 +155,223 @@ def test_portfolio_stats_max_drawdown_is_negative_or_zero():
               for i in range(1, 5)])
     stats = portfolio_stats(df)
     assert stats["max_drawdown"] <= 0.0
+
+
+# ---------------------------------------------------------------------------
+# Sharpe / Sortino annualisation — the math that was wrong before this fix
+# ---------------------------------------------------------------------------
+
+def test_portfolio_stats_sharpe_is_properly_annualised():
+    """Sharpe must scale by sqrt(periods_per_year), not just mean/std."""
+    # Constructed series with known statistics:
+    #   returns = [+10%, -2%, +5%, -3%, +8%, -1%, +4%, -2%]
+    #   mean ≈ 0.02375, std ≈ 0.0476, excess ≈ 0.02375 - (0.045/252)
+    df = _df([
+        _base_row(ticker=t, return_pct=r)
+        for t, r in [("A",10.0),("B",-2.0),("C",5.0),("D",-3.0),
+                     ("E", 8.0),("F",-1.0),("G",4.0),("H",-2.0)]
+    ])
+    stats = portfolio_stats(df, periods_per_year=252.0, risk_free_rate=0.045)
+    # Hand-compute expected:
+    rets = [0.10,-0.02,0.05,-0.03,0.08,-0.01,0.04,-0.02]
+    mean = sum(rets)/len(rets)
+    var  = sum((r-mean)**2 for r in rets)/(len(rets)-1)
+    std  = var**0.5
+    rf_per = 0.045/252.0
+    expected_sharpe = (mean - rf_per) / std * math.sqrt(252.0)
+    assert stats["sharpe"] == pytest.approx(expected_sharpe, rel=1e-3)
+
+
+def test_portfolio_stats_sortino_uses_downside_std():
+    """Sortino's denominator is std of returns below zero, not full std."""
+    df = _df([
+        _base_row(ticker=t, return_pct=r)
+        for t, r in [("A",10.0),("B",-2.0),("C",5.0),("D",-3.0),
+                     ("E", 8.0),("F",-1.0),("G",4.0),("H",-2.0)]
+    ])
+    stats = portfolio_stats(df, periods_per_year=252.0, risk_free_rate=0.045)
+    # Downside returns: -0.02, -0.03, -0.01, -0.02
+    downside = [-0.02,-0.03,-0.01,-0.02]
+    d_mean = sum(downside)/len(downside)
+    d_var  = sum((r-d_mean)**2 for r in downside)/(len(downside)-1)
+    d_std  = d_var**0.5
+    rets = [0.10,-0.02,0.05,-0.03,0.08,-0.01,0.04,-0.02]
+    excess_mean = sum(rets)/len(rets) - 0.045/252.0
+    expected_sortino = excess_mean / d_std * math.sqrt(252.0)
+    assert stats["sortino"] == pytest.approx(expected_sortino, rel=1e-3)
+
+
+def test_portfolio_stats_periods_per_year_override_changes_sharpe():
+    """Doubling periods_per_year should scale Sharpe by sqrt(2)."""
+    df = _df([
+        _base_row(ticker=t, return_pct=r)
+        for t, r in [("A",5.0),("B",-2.0),("C",3.0),("D",-1.0),("E",4.0)]
+    ])
+    s_252 = portfolio_stats(df, periods_per_year=252.0, risk_free_rate=0.0)
+    s_504 = portfolio_stats(df, periods_per_year=504.0, risk_free_rate=0.0)
+    # With rf=0, sharpe scales purely as sqrt(N): doubling N → ×sqrt(2)
+    assert s_504["sharpe"] == pytest.approx(s_252["sharpe"] * math.sqrt(2), rel=1e-4)
+
+
+def test_portfolio_stats_risk_free_zero_matches_no_rf_math():
+    """When rf=0, sharpe = mean/std × sqrt(N) exactly (no excess adjustment)."""
+    df = _df([
+        _base_row(ticker=t, return_pct=r)
+        for t, r in [("A",6.0),("B",-1.0),("C",4.0),("D",-2.0)]
+    ])
+    stats = portfolio_stats(df, periods_per_year=252.0, risk_free_rate=0.0)
+    rets = [0.06,-0.01,0.04,-0.02]
+    mean = sum(rets)/len(rets)
+    var  = sum((r-mean)**2 for r in rets)/(len(rets)-1)
+    std  = var**0.5
+    expected = (mean / std) * math.sqrt(252.0)
+    assert stats["sharpe"] == pytest.approx(expected, rel=1e-3)
+
+
+def test_portfolio_stats_returns_methodology_keys():
+    """Output must include periods_per_year and risk_free_rate for UI display."""
+    df = _df([_base_row()])
+    stats = portfolio_stats(df, periods_per_year=126.0, risk_free_rate=0.03)
+    assert stats["periods_per_year"] == 126.0
+    assert stats["risk_free_rate"] == 0.03
+
+
+def test_portfolio_stats_avg_strategy_sharpe_from_saved_column():
+    """avg_strategy_sharpe = mean of saved per-ticker sharpe column."""
+    df = _df([
+        _base_row(ticker="A", return_pct=10.0, sharpe=1.5),
+        _base_row(ticker="B", return_pct=-2.0, sharpe=0.3),
+        _base_row(ticker="C", return_pct= 4.0, sharpe=0.9),
+    ])
+    stats = portfolio_stats(df)
+    assert stats["avg_strategy_sharpe"] == pytest.approx((1.5 + 0.3 + 0.9) / 3, rel=1e-6)
+
+
+def test_portfolio_stats_defaults_match_documented_constants():
+    """Default annualisation = 252, default rf = 4.5%."""
+    df = _df([_base_row()])
+    stats = portfolio_stats(df)
+    assert stats["periods_per_year"] == DEFAULT_PERIODS_PER_YEAR == 252.0
+    assert stats["risk_free_rate"]   == DEFAULT_RISK_FREE_RATE   == 0.045
+
+
+# ---------------------------------------------------------------------------
+# Time-series helpers (dated_returns_series / drawdown_series / monthly_returns_table)
+# ---------------------------------------------------------------------------
+
+def test_dated_returns_series_empty_df():
+    s = dated_returns_series(pd.DataFrame())
+    assert s.empty
+
+
+def test_dated_returns_series_uses_run_at_when_span_large():
+    """run_at spans 60 days → use real dates as index."""
+    df = _df([
+        {**_base_row(ticker="A", return_pct=10.0), "run_at": "2024-01-01"},
+        {**_base_row(ticker="B", return_pct=-5.0), "run_at": "2024-02-15"},
+        {**_base_row(ticker="C", return_pct=8.0),  "run_at": "2024-03-10"},
+    ])
+    s = dated_returns_series(df)
+    assert len(s) == 3
+    # Should be sorted ascending by date
+    assert s.index[0] < s.index[-1]
+    # First date matches earliest run_at
+    assert s.index[0] == pd.Timestamp("2024-01-01")
+
+
+def test_dated_returns_series_synthetic_when_run_at_narrow():
+    """All run_at on same day → synthesise business-day index."""
+    df = _df([
+        {**_base_row(ticker="A", return_pct=10.0), "run_at": "2024-01-10"},
+        {**_base_row(ticker="B", return_pct=-2.0), "run_at": "2024-01-10"},
+    ])
+    s = dated_returns_series(df)
+    assert len(s) == 2
+    # All dates should be business days
+    assert all(d.weekday() < 5 for d in s.index)
+    # Should end no later than today
+    assert s.index[-1] <= pd.Timestamp.today().normalize()
+
+
+def test_dated_returns_series_no_run_at_uses_synthetic():
+    """No run_at column → synthetic business-day index."""
+    df = _df([_base_row(ticker="A", return_pct=5.0),
+              _base_row(ticker="B", return_pct=-3.0)])
+    df = df.drop(columns=["run_at"], errors="ignore")  # ensure absent
+    s = dated_returns_series(df)
+    assert len(s) == 2
+    assert all(d.weekday() < 5 for d in s.index)
+
+
+def test_drawdown_series_always_non_positive():
+    """Drawdown is defined as ≤ 0 everywhere."""
+    df = _df([
+        _base_row(ticker="A", return_pct=15.0),
+        _base_row(ticker="B", return_pct=-20.0),  # drawdown event
+        _base_row(ticker="C", return_pct= 5.0),
+    ])
+    dd = drawdown_series(df)
+    assert (dd <= 1e-9).all()  # allow tiny floating noise
+
+
+def test_drawdown_series_zero_at_new_high():
+    """Drawdown is exactly 0 when the curve makes a new all-time high."""
+    df = _df([
+        _base_row(ticker="A", return_pct=10.0),
+        _base_row(ticker="B", return_pct=10.0),
+        _base_row(ticker="C", return_pct=10.0),
+    ])
+    dd = drawdown_series(df)
+    # Each step is a new high, so drawdown should be 0 throughout
+    assert all(abs(v) < 1e-9 for v in dd)
+
+
+def test_drawdown_series_reaches_minimum_at_trough():
+    """Drawdown reaches its minimum (most negative) at the worst trough."""
+    df = _df([
+        _base_row(ticker="A", return_pct=20.0),   # peak
+        _base_row(ticker="B", return_pct=-30.0),  # trough
+        _base_row(ticker="C", return_pct= 5.0),   # partial recovery
+    ])
+    dd = drawdown_series(df)
+    # Worst drawdown should be at index 1 (after -30%)
+    assert dd.idxmin() == 1
+
+
+def test_drawdown_series_empty_df():
+    dd = drawdown_series(pd.DataFrame())
+    assert dd.empty
+
+
+def test_monthly_returns_table_returns_expected_columns():
+    df = _df([
+        {**_base_row(ticker="A", return_pct=5.0),  "run_at": "2024-01-15"},
+        {**_base_row(ticker="B", return_pct=3.0),  "run_at": "2024-02-10"},
+        {**_base_row(ticker="C", return_pct=-2.0), "run_at": "2024-03-05"},
+    ])
+    table = monthly_returns_table(df)
+    assert set(["Year", "Month", "Month_label", "Return", "N_obs"]).issubset(table.columns)
+
+
+def test_monthly_returns_table_aggregates_compoundly_in_month():
+    """Two returns in same month → compounded, not summed."""
+    df = _df([
+        {**_base_row(ticker="A", return_pct=10.0), "run_at": "2024-01-05"},
+        {**_base_row(ticker="B", return_pct=10.0), "run_at": "2024-01-20"},
+    ])
+    # Make run_at span > 30 days so we use real dates
+    df = pd.concat([df, _df([
+        {**_base_row(ticker="C", return_pct=0.0), "run_at": "2024-03-15"},
+    ])], ignore_index=True)
+    table = monthly_returns_table(df)
+    jan_row = table[(table["Year"] == 2024) & (table["Month"] == 1)].iloc[0]
+    # Two +10% trades compounded = 1.10 * 1.10 - 1 = 0.21 → 21%
+    assert jan_row["Return"] == pytest.approx(21.0, abs=0.01)
+
+
+def test_monthly_returns_table_empty_df():
+    table = monthly_returns_table(pd.DataFrame())
+    assert table.empty
 
 
 # ---------------------------------------------------------------------------

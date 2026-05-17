@@ -1,26 +1,22 @@
 """
-providers/yfinance_provider.py — Concrete implementations of the provider interfaces.
+providers/yfinance_provider.py — yfinance implementation of MarketDataProvider.
 
-YFinanceProvider wraps all yf.Ticker() calls in one place.
-FinvizDiscoveryProvider wraps the top-gainers HTML scrape.
+Wraps every `yf.Ticker(...)` call in one place. To swap to a paid data source,
+implement `MarketDataProvider` and replace the singletons in callers.
 
-To swap to a paid data source, implement MarketDataProvider / TickerDiscoveryProvider
-and replace the singletons in the modules that import them.
+Phase 5 refactor: `FinvizDiscoveryProvider` was moved to
+`providers/scraped_provider.py` to separate HTML scraping from the
+structured-API yfinance layer. Existing call sites must update their
+imports — there is no backward-compat alias here.
 """
 
 from __future__ import annotations
 
-import requests
-from bs4 import BeautifulSoup
 import yfinance as yf
 import pandas as pd
 
-from providers.base import (
-    Fundamentals,
-    MarketDataProvider,
-    Quote,
-    TickerDiscoveryProvider,
-)
+from providers.base import MarketDataProvider
+from data.models import Fundamentals, Quote
 
 
 class YFinanceProvider(MarketDataProvider):
@@ -71,33 +67,3 @@ class YFinanceProvider(MarketDataProvider):
     ) -> tuple[pd.DataFrame, pd.DataFrame]:
         chain = yf.Ticker(ticker).option_chain(expiry)
         return chain.calls, chain.puts
-
-
-class FinvizDiscoveryProvider(TickerDiscoveryProvider):
-
-    _URL = "https://finviz.com/screener.ashx?v=111&s=ta_topgainers"
-    _HEADERS = {
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/120.0.0.0 Safari/537.36"
-        )
-    }
-
-    def get_gainers(self, limit: int = 50) -> list[str]:
-        try:
-            resp = requests.get(self._URL, headers=self._HEADERS, timeout=15)
-            resp.raise_for_status()
-            soup = BeautifulSoup(resp.text, "html.parser")
-            tickers: list[str] = []
-            for a in soup.find_all("a", href=True):
-                href = a["href"]
-                if href.startswith("quote.ashx?t="):
-                    t = href.split("t=")[1].split("&")[0].strip().upper()
-                    if t and t not in tickers:
-                        tickers.append(t)
-            print(f"Finviz: {len(tickers)} top gainers")
-            return tickers[:limit]
-        except Exception as e:
-            print(f"Finviz fetch failed: {e}")
-            return []

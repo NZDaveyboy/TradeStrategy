@@ -17,6 +17,8 @@ import json
 import os
 from datetime import datetime, timezone
 
+import pandas as pd
+
 from core.db import get_connection
 
 # ---------------------------------------------------------------------------
@@ -64,29 +66,48 @@ _EXTENDED_TYPES = {"Strong but extended", "Strong downside setup", "Overextended
 
 def _spy_regime() -> str:
     """
-    Returns "Bullish", "Neutral", or "Bearish" based on SPY price vs EMA20.
-    Also appends a brief descriptor.
+    Returns a short-term regime label combined with the long-term EMA200 trend.
+    Pulls 1y of SPY so EMA200 is properly warmed.
     """
     try:
-        hist = _provider.get_ohlcv("SPY", "60d", "1d")
+        hist = _provider.get_ohlcv("SPY", "1y", "1d")
         if len(hist) < 20:
             return "Neutral — insufficient SPY data"
         close = hist["Close"]
         price = float(close.iloc[-1])
-        ema20 = float(close.ewm(span=20, adjust=False).mean().iloc[-1])
-        ema9  = float(close.ewm(span=9,  adjust=False).mean().iloc[-1])
-        chg1  = (price - float(close.iloc[-2])) / float(close.iloc[-2]) * 100
+        ema20  = float(close.ewm(span=20,  adjust=False).mean().iloc[-1])
+        ema9   = float(close.ewm(span=9,   adjust=False).mean().iloc[-1])
+        ema200 = float(close.ewm(span=200, adjust=False).mean().iloc[-1]) if len(close) >= 200 else None
+        chg1   = (price - float(close.iloc[-2])) / float(close.iloc[-2]) * 100
 
         if price > ema20 and ema9 > ema20:
-            regime = "Bullish"
+            short_term = "Bullish"
         elif price < ema20 and ema9 < ema20:
-            regime = "Bearish"
+            short_term = "Bearish"
         else:
-            regime = "Neutral"
+            short_term = "Neutral"
+
+        if ema200 is None:
+            regime = short_term
+            long_term_note = ""
+        else:
+            long_term = "above 200 EMA" if price > ema200 else "below 200 EMA"
+            long_term_note = f"  EMA200 ${ema200:.2f} ({long_term})"
+            # Compose a combined label that flags trend-counter setups
+            if short_term == "Bullish" and price > ema200:
+                regime = "Bullish (trend-aligned)"
+            elif short_term == "Bearish" and price < ema200:
+                regime = "Bearish (trend-aligned)"
+            elif short_term == "Bullish" and price < ema200:
+                regime = "Bullish (counter-trend bounce)"
+            elif short_term == "Bearish" and price > ema200:
+                regime = "Bearish (pullback in uptrend)"
+            else:
+                regime = f"{short_term} ({long_term})"
 
         return (
-            f"{regime} — SPY ${price:.2f}  EMA20 ${ema20:.2f}  "
-            f"({chg1:+.2f}% today)"
+            f"{regime} — SPY ${price:.2f}  EMA20 ${ema20:.2f}"
+            f"{long_term_note}  ({chg1:+.2f}% today)"
         )
     except Exception as e:
         return f"Unknown — SPY data error ({e})"
@@ -146,8 +167,38 @@ def _parse_explain(row: dict) -> dict:
 # Section builders
 # ---------------------------------------------------------------------------
 
+def _fetch_catalyst_line(ticker: str, price: float) -> str | None:
+    """Fetch CatalystScore + top tag for a ticker. Returns None on failure.
+
+    Called only for the top picks in the brief (≤6 picks) so network cost
+    is bounded. Each lookup hits ~4 yfinance endpoints; for a daily brief
+    this is acceptable latency.
+    """
+    try:
+        from core.catalysts import compute_catalyst_score
+        cat = compute_catalyst_score(ticker, price)
+    except Exception:
+        return None
+    score = cat.get("score")
+    if score is None:
+        return None
+    tags = cat.get("tags") or []
+    # Prefer ⚠ tag (binary event risk) — surfaces the most actionable warning
+    warning_tag = next((t for t in tags if "⚠" in t), None)
+    top_tag = warning_tag or (tags[0] if tags else "")
+    if score >= 65:
+        lean = "🟢 bullish-leaning"
+    elif score <= 35:
+        lean = "🔴 bearish-leaning"
+    else:
+        lean = "⚪ mixed"
+    if top_tag:
+        return f"   CatalystScore {score:.0f}/100 ({lean}) — {top_tag}"
+    return f"   CatalystScore {score:.0f}/100 ({lean})"
+
+
 def _fmt_ticker_long(row: dict) -> str:
-    """One block for a long setup."""
+    """One block for a long setup. CatalystScore is appended when available."""
     ex       = _parse_explain(row)
     ticker   = row["ticker"]
     score    = int(row.get("tradescore") or 0)
@@ -169,11 +220,14 @@ def _fmt_ticker_long(row: dict) -> str:
         f"   Entry &gt; ${entry_zone:.2f}  |  Stop ${invalidation}  |  Target ${target}",
         f"   RVOL {rvol:.1f}x  RSI {rsi:.0f}  |  {conviction}",
     ]
+    cat_line = _fetch_catalyst_line(ticker, float(price))
+    if cat_line:
+        lines.append(cat_line)
     return "\n".join(lines)
 
 
 def _fmt_ticker_short(row: dict) -> str:
-    """One block for a short/bearish setup."""
+    """One block for a short/bearish setup. CatalystScore appended when available."""
     ex       = _parse_explain(row)
     ticker   = row["ticker"]
     score    = int(row.get("tradescore") or 0)
@@ -195,6 +249,9 @@ def _fmt_ticker_short(row: dict) -> str:
         f"   Entry &lt; ${entry_zone:.2f}  |  Stop ${invalidation}  |  Target ${target}",
         f"   RVOL {rvol:.1f}x  RSI {rsi:.0f}  |  {conviction}",
     ]
+    cat_line = _fetch_catalyst_line(ticker, float(price))
+    if cat_line:
+        lines.append(cat_line)
     return "\n".join(lines)
 
 
@@ -224,6 +281,163 @@ def _fmt_ticker_avoid(row: dict) -> str:
     stype  = row.get("setup_type") or "—"
     reason = ex.get("conviction") or stype
     return f"<b>{ticker}</b> — {reason}"
+
+
+# ---------------------------------------------------------------------------
+# Dashboard sections — Quantum signals + Earnings + 8-Ks
+# Each builder returns a section string (HTML for Telegram) or None on
+# failure. Each is wrapped in try/except so the brief never fails because
+# of these — they're additive, not load-bearing.
+# ---------------------------------------------------------------------------
+
+def _section_quantum_signals() -> str | None:
+    """Top BUY + SELL signals from the Quantum Ecosystem classifier.
+
+    Pulls 24 tickers + builds the index + runs classify_constituents.
+    ~15-25s. Wrapped in try/except — returns None on any failure.
+    """
+    try:
+        from datetime import date as _date, timedelta as _td
+        from core.quantum import (
+            load_universe, fetch_prices, IndexBuilder, classify_constituents,
+        )
+
+        uni = load_universe()
+        tickers = [c.ticker for c in uni.all_companies()] + list(uni.benchmarks)
+        today = _date.today()
+        start = today - _td(days=400)
+        prices = fetch_prices(tickers, start, today)
+        if prices.empty:
+            return None
+        uni_tickers = [c.ticker for c in uni.all_companies()]
+        uni_prices  = prices[[t for t in uni_tickers if t in prices.columns]]
+        result = IndexBuilder(uni, prices).build_ecosystem(
+            pd.Timestamp(start), pd.Timestamp(today),
+        )
+        sigs = classify_constituents(result, uni_prices, uni)
+        if sigs.empty:
+            return None
+    except Exception as e:
+        print(f"  quantum signals failed: {e}")
+        return None
+
+    buys  = sigs[sigs["Signal"] == "BUY"].head(3)
+    sells = sigs[sigs["Signal"] == "SELL"].head(2)
+
+    if buys.empty and sells.empty:
+        return None
+
+    lines: list[str] = []
+    for _, r in buys.iterrows():
+        # Truncate reason for Telegram compactness
+        reason = str(r["Reason"])[:70]
+        lines.append(
+            f"🟢 <b>{r['Ticker']}</b> BUY  Conv {r['Conviction']:.1f}  "
+            f"1m {r['1m %']:+.1f}%  — {reason}"
+        )
+    for _, r in sells.iterrows():
+        reason = str(r["Reason"])[:70]
+        lines.append(
+            f"🔴 <b>{r['Ticker']}</b> SELL  Held {r['Held return %']:+.0f}%  "
+            f"1m {r['1m %']:+.1f}%  — {reason}"
+        )
+
+    return "<b>⚛️ QUANTUM SIGNALS</b>\n" + "\n".join(lines)
+
+
+def _section_upcoming_earnings() -> str | None:
+    """Earnings in next 7 days from the Quantum universe."""
+    try:
+        from core.quantum import load_universe
+        from core.catalysts import get_next_earnings
+
+        uni = load_universe()
+        rows = []
+        for c in uni.all_companies():
+            try:
+                e = get_next_earnings(c.ticker)
+            except Exception:
+                continue
+            if not e:
+                continue
+            d = e.get("days_to")
+            if d is None or d < 0 or d > 7:
+                continue
+            rows.append({
+                "ticker": c.ticker,
+                "date":   e["date"],
+                "days":   d,
+                "eps":    e.get("eps_estimate"),
+            })
+    except Exception as e:
+        print(f"  earnings section failed: {e}")
+        return None
+
+    if not rows:
+        return None
+    rows.sort(key=lambda x: x["days"])
+
+    lines: list[str] = []
+    for r in rows[:5]:
+        eps_str = f"  est ${r['eps']:.2f}" if r['eps'] else ""
+        lines.append(
+            f"📊 <b>{r['ticker']}</b>  {r['date']} (in {r['days']}d){eps_str}"
+        )
+    return "<b>📅 EARNINGS IN NEXT 7d</b>\n" + "\n".join(lines)
+
+
+def _section_recent_8ks() -> str | None:
+    """Material 8-K filings in the last 7 days across the Quantum universe."""
+    try:
+        from core.quantum import load_universe
+        from core.sec_edgar import get_recent_filings
+
+        uni = load_universe()
+        rows = []
+        now  = pd.Timestamp.today()
+        for c in uni.all_companies():
+            try:
+                fs = get_recent_filings(c.ticker, limit=3)
+            except Exception:
+                continue
+            for f in fs:
+                if (f or {}).get("form") != "8-K":
+                    continue
+                fd = f.get("filed", "")
+                if not fd:
+                    continue
+                try:
+                    age_days = (now - pd.Timestamp(fd)).days
+                except Exception:
+                    continue
+                if age_days > 7:
+                    continue
+                rows.append({
+                    "ticker":      c.ticker,
+                    "date":        fd,
+                    "url":         f.get("url", ""),
+                    "items_label": f.get("items_label", ""),
+                })
+    except Exception as e:
+        print(f"  8-K section failed: {e}")
+        return None
+
+    if not rows:
+        return None
+    rows.sort(key=lambda x: x["date"], reverse=True)
+
+    lines: list[str] = []
+    for r in rows[:5]:
+        # Highlight-reel format: "QBTS  2026-05-13  📝 Material Agreement  [link]"
+        label = r.get("items_label") or "8-K"
+        if r["url"]:
+            lines.append(
+                f'📜 <b>{r["ticker"]}</b>  {r["date"]}  {label}  '
+                f'<a href="{r["url"]}">→</a>'
+            )
+        else:
+            lines.append(f'📜 <b>{r["ticker"]}</b>  {r["date"]}  {label}')
+    return "<b>📜 RECENT 8-Ks (7d)</b>\n" + "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
@@ -308,6 +522,17 @@ def build_brief(rows: list[dict], regime: str, run_date: str) -> str:
     else:
         body = "<i>None flagged.</i>"
     sections.append(f"<b>AVOID / LOW QUALITY</b>\n{body}")
+
+    # ── Dashboard sections (additive — fail-silent if data unavailable) ──
+    qs_section = _section_quantum_signals()
+    if qs_section:
+        sections.append(qs_section)
+    earn_section = _section_upcoming_earnings()
+    if earn_section:
+        sections.append(earn_section)
+    f8k_section = _section_recent_8ks()
+    if f8k_section:
+        sections.append(f8k_section)
 
     # Today's focus — top 3 overall, best R/R, most likely too late
     all_valid = [r for r in rows if r.get("setup_type") not in _AVOID_TYPES]

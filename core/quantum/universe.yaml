@@ -1,0 +1,214 @@
+# Quantum index universe
+#
+# Each company has:
+#   ticker:                 Yahoo Finance symbol
+#   company_name:           Display name
+#   quantum_exposure_score: 1-5, how much of business is quantum-related
+#                             5 = pure-play quantum
+#                             4 = major quantum business inside a larger company (e.g. IBM Q)
+#                             3 = significant enabler (semis, EDA, photonics for QC)
+#                             2 = adjacent infrastructure (cloud, networking)
+#                             1 = light tangential exposure
+#   liquidity_score:        1-5, daily $ volume; 5 = mega-cap / very tight spread
+#   profitability_score:    1-5, profitability + FCF; 5 = highly profitable
+#                             1 = pre-revenue / heavy losses
+#   risk_score:             1-5, volatility + drawdown profile; 5 = highly volatile
+#   max_weight:             0.0-1.0 hard cap on weight in any index (in addition to index-level caps)
+#   notes:                  Free-text rationale
+#
+# Scores are judgement calls — edit them as your view changes. The
+# Quantum Ecosystem Index uses them via the conviction-weight formula:
+#   final_score = 0.40*quantum_exposure + 0.20*liquidity + 0.20*profitability - 0.20*risk
+#
+# Negative final_scores are clamped to 0 (effectively excluded).
+
+pure_play_quantum:
+  - ticker: IONQ
+    company_name: "IonQ, Inc."
+    quantum_exposure_score: 5
+    liquidity_score: 4
+    profitability_score: 1
+    risk_score: 5
+    max_weight: 0.25
+    notes: "Trapped-ion quantum computing. Most-traded pure-play."
+
+  - ticker: RGTI
+    company_name: "Rigetti Computing"
+    quantum_exposure_score: 5
+    liquidity_score: 3
+    profitability_score: 1
+    risk_score: 5
+    max_weight: 0.25
+    notes: "Superconducting qubit chip + cloud platform."
+
+  - ticker: QBTS
+    company_name: "D-Wave Quantum"
+    quantum_exposure_score: 5
+    liquidity_score: 3
+    profitability_score: 1
+    risk_score: 5
+    max_weight: 0.25
+    notes: "Quantum annealing approach + Advantage hardware."
+
+  - ticker: QUBT
+    company_name: "Quantum Computing Inc."
+    quantum_exposure_score: 5
+    liquidity_score: 2
+    profitability_score: 1
+    risk_score: 5
+    max_weight: 0.25
+    notes: "Photonic quantum computing; very small float."
+
+quantum_security_networking:
+  - ticker: ARQQ
+    company_name: "Arqit Quantum"
+    quantum_exposure_score: 4
+    liquidity_score: 2
+    profitability_score: 1
+    risk_score: 5
+    max_weight: 0.10
+    notes: "Quantum-safe encryption for telecoms."
+
+  - ticker: LAES
+    company_name: "SEALSQ Corp"
+    quantum_exposure_score: 4
+    liquidity_score: 2
+    profitability_score: 2
+    risk_score: 5
+    max_weight: 0.10
+    notes: "Post-quantum semiconductors and identity."
+
+  - ticker: NET
+    company_name: "Cloudflare"
+    quantum_exposure_score: 2
+    liquidity_score: 5
+    profitability_score: 3
+    risk_score: 3
+    max_weight: 0.10
+    notes: "Post-quantum TLS adopter; network-layer crypto."
+
+  - ticker: PANW
+    company_name: "Palo Alto Networks"
+    quantum_exposure_score: 2
+    liquidity_score: 5
+    profitability_score: 4
+    risk_score: 2
+    max_weight: 0.10
+    notes: "Enterprise security incl. post-quantum readiness products."
+
+quantum_enablers:
+  - ticker: IBM
+    company_name: "International Business Machines"
+    quantum_exposure_score: 4
+    liquidity_score: 5
+    profitability_score: 4
+    risk_score: 2
+    max_weight: 0.12
+    notes: "IBM Quantum — Condor, Heron processors; commercial roadmap."
+
+  - ticker: GOOGL
+    company_name: "Alphabet"
+    quantum_exposure_score: 3
+    liquidity_score: 5
+    profitability_score: 5
+    risk_score: 2
+    max_weight: 0.12
+    notes: "Google Quantum AI — Willow chip, error-correction work."
+
+  - ticker: MSFT
+    company_name: "Microsoft"
+    quantum_exposure_score: 3
+    liquidity_score: 5
+    profitability_score: 5
+    risk_score: 2
+    max_weight: 0.12
+    notes: "Azure Quantum platform + topological qubit research."
+
+  - ticker: NVDA
+    company_name: "NVIDIA"
+    quantum_exposure_score: 3
+    liquidity_score: 5
+    profitability_score: 5
+    risk_score: 3
+    max_weight: 0.12
+    notes: "CUDA-Q, classical accelerators for QC simulation."
+
+  - ticker: HON
+    company_name: "Honeywell"
+    quantum_exposure_score: 3
+    liquidity_score: 5
+    profitability_score: 4
+    risk_score: 2
+    max_weight: 0.10
+    notes: "Quantinuum stake (with Cambridge Quantum)."
+
+  - ticker: TSM
+    company_name: "Taiwan Semiconductor Manufacturing"
+    quantum_exposure_score: 3
+    liquidity_score: 5
+    profitability_score: 5
+    risk_score: 3
+    max_weight: 0.10
+    notes: "Fabricates leading-edge nodes used in QC control electronics."
+
+  - ticker: ASML
+    company_name: "ASML"
+    quantum_exposure_score: 3
+    liquidity_score: 5
+    profitability_score: 5
+    risk_score: 3
+    max_weight: 0.10
+    notes: "EUV lithography monopoly; enables sub-3nm classical + QC control chips."
+
+  - ticker: AMAT
+    company_name: "Applied Materials"
+    quantum_exposure_score: 3
+    liquidity_score: 5
+    profitability_score: 4
+    risk_score: 3
+    max_weight: 0.10
+    notes: "Semiconductor wafer-fab equipment; cryo / specialty deposition."
+
+  - ticker: LRCX
+    company_name: "Lam Research"
+    quantum_exposure_score: 3
+    liquidity_score: 5
+    profitability_score: 4
+    risk_score: 3
+    max_weight: 0.10
+    notes: "Etch + deposition tooling; cryogenic process partners."
+
+  - ticker: KLAC
+    company_name: "KLA Corporation"
+    quantum_exposure_score: 3
+    liquidity_score: 5
+    profitability_score: 5
+    risk_score: 3
+    max_weight: 0.10
+    notes: "Process control + inspection equipment."
+
+  - ticker: KEYS
+    company_name: "Keysight Technologies"
+    quantum_exposure_score: 3
+    liquidity_score: 4
+    profitability_score: 4
+    risk_score: 2
+    max_weight: 0.08
+    notes: "Test + measurement instruments used heavily in QC labs."
+
+  - ticker: FORM
+    company_name: "FormFactor"
+    quantum_exposure_score: 3
+    liquidity_score: 3
+    profitability_score: 3
+    risk_score: 4
+    max_weight: 0.08
+    notes: "Cryogenic probe stations for QC characterisation."
+
+# Benchmark tickers (not investable index members; used for correlation
+# and performance comparison only).
+benchmarks:
+  - QQQ      # Invesco QQQ — Nasdaq-100, broad tech benchmark
+  - SMH      # VanEck Semiconductors ETF — semis sector benchmark
+  - SPY      # S&P 500 ETF — broad-market benchmark
+  - QTUM     # Defiance Quantum ETF — the closest commercial quantum-themed product

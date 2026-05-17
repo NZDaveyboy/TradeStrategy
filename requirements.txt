@@ -5,8 +5,19 @@ beautifulsoup4
 requests
 streamlit
 
+# Phase 5 — typed schemas + universe validation
+pydantic>=2.0
+pyyaml>=6.0
+
 # Phase 7 — backtesting engine
 backtesting @ git+https://github.com/NZDaveyboy/backtesting.py
 
 # Phase 8 — analytics and tearsheets
 quantstats @ git+https://github.com/NZDaveyboy/quantstats
+
+# Phase 8 — interactive charts in Quantum tab
+plotly>=5.18
+
+# Copilot tab — Claude API + .env loading
+anthropic>=0.40
+python-dotenv>=1.0

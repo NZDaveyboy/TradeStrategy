@@ -353,3 +353,103 @@ def test_target_is_2r_above_entry_for_long():
     risk   = rec.entry_reference - rec.invalidation_price
     reward = rec.target_price    - rec.entry_reference
     assert reward == pytest.approx(2 * risk, rel=0.01)
+
+
+# ---------------------------------------------------------------------------
+# Catalyst overlay — Phase 10 integration with recommendations
+# ---------------------------------------------------------------------------
+
+def test_catalyst_none_is_backward_compatible():
+    """No catalyst passed → identical behaviour to before the overlay existed."""
+    rec_no_cat   = build_recommendation(_row(), iv_mode="fallback")
+    rec_explicit = build_recommendation(_row(), iv_mode="fallback", catalyst=None)
+    assert rec_no_cat.rationale == rec_explicit.rationale
+    assert rec_no_cat.warnings  == rec_explicit.warnings
+
+
+def test_catalyst_appends_summary_to_rationale():
+    """When catalyst is provided, rationale should include CatalystScore summary."""
+    catalyst = {
+        "score": 78,
+        "tags":  ["4-quarter beat streak", "Consensus rating: buy (25 analysts)"],
+    }
+    rec = build_recommendation(_row(), iv_mode="fallback", catalyst=catalyst)
+    assert "CatalystScore 78/100" in rec.rationale
+    assert "bullish-leaning" in rec.rationale
+    assert "4-quarter beat streak" in rec.rationale
+
+
+def test_catalyst_low_score_labelled_bearish():
+    """Score ≤ 35 → bearish-leaning label."""
+    catalyst = {"score": 25, "tags": ["Earnings miss last quarter (-12% surprise)"]}
+    rec = build_recommendation(_row(), iv_mode="fallback", catalyst=catalyst)
+    assert "bearish-leaning" in rec.rationale
+
+
+def test_catalyst_mid_score_labelled_neutral():
+    """35 < Score < 65 → mixed / neutral label."""
+    catalyst = {"score": 50, "tags": ["Consensus rating: hold (10 analysts)"]}
+    rec = build_recommendation(_row(), iv_mode="fallback", catalyst=catalyst)
+    assert "mixed / neutral" in rec.rationale
+
+
+def test_catalyst_warning_tag_promoted_to_warnings():
+    """Tags containing ⚠ become warnings (binary event risk)."""
+    catalyst = {
+        "score": 80,
+        "tags":  ["4-quarter beat streak", "⚠ Earnings in 4 days — binary event risk"],
+    }
+    rec = build_recommendation(_row(), iv_mode="fallback", catalyst=catalyst)
+    assert any("⚠" in w for w in rec.warnings)
+    assert any("Earnings in 4 days" in w for w in rec.warnings)
+
+
+def test_catalyst_non_warning_tags_do_not_become_warnings():
+    """Normal tags (no ⚠) should not pollute the warnings list."""
+    baseline = build_recommendation(_row(), iv_mode="fallback")
+    catalyst = {"score": 70, "tags": ["Consensus rating: buy (20 analysts)"]}
+    rec = build_recommendation(_row(), iv_mode="fallback", catalyst=catalyst)
+    # Only baseline warnings should remain — no catalyst tag promotion
+    assert len(rec.warnings) == len(baseline.warnings)
+
+
+def test_catalyst_does_not_change_strategy_or_stop():
+    """Catalyst is context only — strategy, stop, target must be unchanged."""
+    no_cat = build_recommendation(_row(), iv_mode="fallback")
+    catalyst = {"score": 90, "tags": ["Strong earnings beat (+25%)"]}
+    with_cat = build_recommendation(_row(), iv_mode="fallback", catalyst=catalyst)
+    assert with_cat.strategy_name      == no_cat.strategy_name
+    assert with_cat.invalidation_price == no_cat.invalidation_price
+    assert with_cat.target_price       == no_cat.target_price
+    assert with_cat.risk_reward        == no_cat.risk_reward
+
+
+def test_catalyst_warning_tag_not_duplicated_on_repeat_calls():
+    """Calling with the same ⚠ tag twice should not duplicate the warning."""
+    catalyst = {"score": 70, "tags": ["⚠ Earnings in 2 days"]}
+    rec = build_recommendation(_row(), iv_mode="fallback", catalyst=catalyst)
+    count = sum(1 for w in rec.warnings if "Earnings in 2 days" in w)
+    assert count == 1
+
+
+def test_catalyst_score_none_skips_overlay():
+    """If catalyst dict has score=None and no tags → no rationale modification."""
+    baseline = build_recommendation(_row(), iv_mode="fallback")
+    catalyst = {"score": None, "tags": []}
+    rec = build_recommendation(_row(), iv_mode="fallback", catalyst=catalyst)
+    assert rec.rationale == baseline.rationale
+
+
+def test_catalyst_score_none_with_warning_tag_still_promotes():
+    """⚠ tag should still go to warnings even when score is None."""
+    catalyst = {"score": None, "tags": ["⚠ Earnings in 3 days"]}
+    rec = build_recommendation(_row(), iv_mode="fallback", catalyst=catalyst)
+    assert any("Earnings in 3 days" in w for w in rec.warnings)
+
+
+def test_catalyst_invalid_input_is_ignored():
+    """Non-dict catalyst input should be safely ignored."""
+    baseline = build_recommendation(_row(), iv_mode="fallback")
+    rec      = build_recommendation(_row(), iv_mode="fallback", catalyst="not a dict")
+    assert rec.rationale == baseline.rationale
+    assert rec.warnings  == baseline.warnings

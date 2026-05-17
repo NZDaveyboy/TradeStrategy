@@ -14,8 +14,9 @@ from unittest.mock import MagicMock, patch
 import pandas as pd
 import pytest
 
-from providers.base import Fundamentals, Quote
-from providers.yfinance_provider import FinvizDiscoveryProvider, YFinanceProvider
+from data.models import Fundamentals, Quote
+from providers.scraped_provider import FinvizDiscoveryProvider
+from providers.yfinance_provider import YFinanceProvider
 
 
 # ---------------------------------------------------------------------------
@@ -224,7 +225,7 @@ _FINVIZ_HTML = """
 """
 
 
-@patch("providers.yfinance_provider.requests.get")
+@patch("providers.scraped_provider.requests.get")
 def test_finviz_get_gainers_parses_tickers(mock_get):
     mock_resp = MagicMock()
     mock_resp.text = _FINVIZ_HTML
@@ -239,7 +240,7 @@ def test_finviz_get_gainers_parses_tickers(mock_get):
     assert "SKIP" not in tickers
 
 
-@patch("providers.yfinance_provider.requests.get")
+@patch("providers.scraped_provider.requests.get")
 def test_finviz_get_gainers_deduplicates(mock_get):
     mock_resp = MagicMock()
     mock_resp.text = _FINVIZ_HTML
@@ -250,7 +251,7 @@ def test_finviz_get_gainers_deduplicates(mock_get):
     assert tickers.count("NVDA") == 1  # appears twice in HTML, returned once
 
 
-@patch("providers.yfinance_provider.requests.get")
+@patch("providers.scraped_provider.requests.get")
 def test_finviz_get_gainers_respects_limit(mock_get):
     # 3 unique tickers in HTML; limit=2 should return only 2
     mock_resp = MagicMock()
@@ -262,7 +263,7 @@ def test_finviz_get_gainers_respects_limit(mock_get):
     assert len(tickers) <= 2
 
 
-@patch("providers.yfinance_provider.requests.get")
+@patch("providers.scraped_provider.requests.get")
 def test_finviz_get_gainers_returns_empty_list_on_error(mock_get):
     mock_get.side_effect = Exception("connection refused")
 

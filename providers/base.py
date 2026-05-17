@@ -3,36 +3,22 @@ providers/base.py — Abstract provider interfaces for market data and ticker di
 
 Swap implementations without touching business logic. All call sites depend on
 these abstractions, not on yfinance or any specific data source.
+
+The typed data schemas (Quote, Fundamentals, OHLCVBar, OptionContract, etc.)
+live in `data/models.py` — this module re-exports them for backward compat
+with existing imports. New code should import from `data.models` directly.
 """
 
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
 
 import pandas as pd
 
-
-@dataclass
-class Quote:
-    """Live quote from fast_info — low latency (~50ms)."""
-    last_price: float
-    open: float
-    prev_close: float
-    market_cap: float | None
-
-
-@dataclass
-class Fundamentals:
-    """Company fundamentals from the full info dict — slower (~500ms).
-    Only call when name, sector, float, or summary are actually needed."""
-    name: str
-    market_cap: float | None
-    float_shares: float | None
-    sector: str = ""
-    industry: str = ""
-    summary: str = ""
-    website: str = ""
+# Re-export typed schemas from the data layer (Phase 5 refactor).
+# Existing call sites that do `from providers.base import Quote, Fundamentals`
+# continue to work; new code should import from `data.models` directly.
+from data.models import Fundamentals, Quote  # noqa: F401  (re-exported)
 
 
 class MarketDataProvider(ABC):
